@@ -30,7 +30,10 @@ with open(args.filename, 'r') as file:
 
 
 tb_logger =  TensorBoardLogger(save_dir=config['logging_params']['save_dir'],
-                               name=config['model_params']['name'],)
+                               name=config['logging_params']['name'],)
+
+# Save hyperparameters
+tb_logger.log_hyperparams(config)
 
 # For reproducibility
 seed_everything(config['exp_params']['manual_seed'], True)
@@ -50,10 +53,11 @@ runner = Trainer(logger=tb_logger,
                                      monitor= "val_loss",
                                      save_last= True),
                  ],
-                 strategy=DDPPlugin(find_unused_parameters=False),
+                 strategy=DDPPlugin(find_unused_parameters=True),
                  **config['trainer_params'])
 
 
+Path(f"{tb_logger.log_dir}/Inputs").mkdir(exist_ok=True, parents=True)
 Path(f"{tb_logger.log_dir}/Samples").mkdir(exist_ok=True, parents=True)
 Path(f"{tb_logger.log_dir}/Reconstructions").mkdir(exist_ok=True, parents=True)
 

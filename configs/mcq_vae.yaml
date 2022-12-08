@@ -1,0 +1,33 @@
+model_params:
+  name: 'MCQVAE'
+  in_channels: 10
+  embedding_dim: 64 
+  hidden_dims: [32, 64, 128, 256]
+  num_embeddings: 16
+  img_size: 256
+  codebooks: 4
+  beta: 0.25
+
+data_params:
+  # data_path: "../ARC/training_data_base.json"
+  data_path: "../ARC/training_data_augment800_uncoupled.json"
+  train_batch_size: 64
+  val_batch_size:  64
+  patch_size: 64
+  num_workers: 4
+
+
+exp_params:
+  LR: 0.0005
+  weight_decay: 0.0
+  scheduler_gamma: 0.98
+  kld_weight: 0.00025
+  manual_seed: 1320
+
+trainer_params:
+  gpus: [1]
+  max_epochs: 20
+
+logging_params:
+  save_dir: "logs/"
+  name: 'MCQVAE'

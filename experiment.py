@@ -66,6 +66,12 @@ class VAEXperiment(pl.LightningModule):
         test_input, test_label = next(iter(self.trainer.datamodule.test_dataloader()))
         test_input = test_input.to(self.curr_device)
         test_label = test_label.to(self.curr_device)
+        vutils.save_image( test_input.data,
+                          os.path.join(self.logger.log_dir , 
+                                       "Inputs", 
+                                       f"inputs_{self.logger.name}_Epoch_{self.current_epoch}.png"),
+                          normalize=True,
+                          nrow=12)
 
 #         test_input, test_label = batch
         recons = self.model.generate(test_input, labels = test_label)
@@ -77,13 +83,13 @@ class VAEXperiment(pl.LightningModule):
                           nrow=12)
 
         try:
-            samples = self.model.sample(144,
+            samples = self.model.sample(32,#144,
                                         self.curr_device,
                                         labels = test_label)
             vutils.save_image(samples.cpu().data,
                               os.path.join(self.logger.log_dir , 
                                            "Samples",      
-                                           f"{self.logger.name}_Epoch_{self.current_epoch}.png"),
+                                           f"sample_{self.logger.name}_Epoch_{self.current_epoch}.png"),
                               normalize=True,
                               nrow=12)
         except Warning:

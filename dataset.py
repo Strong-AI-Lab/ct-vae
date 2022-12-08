@@ -61,7 +61,7 @@ class OxfordPets(Dataset):
         if self.transforms is not None:
             img = self.transforms(img)
         
-        return img, 0.0 # dummy datat to prevent breaking 
+        return img, 0.0 # dummy data to prevent breaking 
 
 class VAEDataset(LightningDataModule):
     """
@@ -173,7 +173,7 @@ class VAEDataset(LightningDataModule):
     def test_dataloader(self) -> Union[DataLoader, List[DataLoader]]:
         return DataLoader(
             self.val_dataset,
-            batch_size=144,
+            batch_size=self.val_batch_size,#144,
             num_workers=self.num_workers,
             shuffle=True,
             pin_memory=self.pin_memory,
