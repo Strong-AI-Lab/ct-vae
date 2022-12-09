@@ -32,10 +32,12 @@ class VAEXperiment(pl.LightningModule):
         return self.model(input, **kwargs)
 
     def training_step(self, batch, batch_idx, optimizer_idx = 0):
-        real_img, labels = batch
+        real_img, labels, *args = batch
         self.curr_device = real_img.device
 
-        results = self.forward(real_img, labels = labels)
+        kwargs = {} if len(args) < 1 or type(args[0]) != dict else args[0]
+
+        results = self.forward(real_img, labels = labels, **kwargs)
         train_loss = self.model.loss_function(*results,
                                               M_N = self.params['kld_weight'], #al_img.shape[0]/ self.num_train_imgs,
                                               optimizer_idx=optimizer_idx,
@@ -46,10 +48,12 @@ class VAEXperiment(pl.LightningModule):
         return train_loss['loss']
 
     def validation_step(self, batch, batch_idx, optimizer_idx = 0):
-        real_img, labels = batch
+        real_img, labels, *args = batch
         self.curr_device = real_img.device
+        
+        kwargs = {} if len(args) < 1 or type(args[0]) != dict else args[0]
 
-        results = self.forward(real_img, labels = labels)
+        results = self.forward(real_img, labels = labels, **kwargs)
         val_loss = self.model.loss_function(*results,
                                             M_N = 1.0, #real_img.shape[0]/ self.num_val_imgs,
                                             optimizer_idx = optimizer_idx,
@@ -63,9 +67,12 @@ class VAEXperiment(pl.LightningModule):
         
     def sample_images(self):
         # Get sample reconstruction image            
-        test_input, test_label = next(iter(self.trainer.datamodule.test_dataloader()))
+        test_input, test_label, *args = next(iter(self.trainer.datamodule.test_dataloader()))
         test_input = test_input.to(self.curr_device)
         test_label = test_label.to(self.curr_device)
+
+        kwargs = {} if len(args) < 1 or type(args[0]) != dict else args[0]
+
         vutils.save_image( test_input.data,
                           os.path.join(self.logger.log_dir , 
                                        "Inputs", 
@@ -74,8 +81,8 @@ class VAEXperiment(pl.LightningModule):
                           nrow=12)
 
 #         test_input, test_label = batch
-        recons = self.model.generate(test_input, labels = test_label)
-        vutils.save_image(recons.data,
+        recons = self.model.generate(test_input, labels = test_label, **kwargs)
+        vutils.save_image( recons.data,
                           os.path.join(self.logger.log_dir , 
                                        "Reconstructions", 
                                        f"recons_{self.logger.name}_Epoch_{self.current_epoch}.png"),
@@ -85,8 +92,9 @@ class VAEXperiment(pl.LightningModule):
         try:
             samples = self.model.sample(32,#144,
                                         self.curr_device,
-                                        labels = test_label)
-            vutils.save_image(samples.cpu().data,
+                                        labels = test_label,
+                                        **kwargs)
+            vutils.save_image( samples.cpu().data,
                               os.path.join(self.logger.log_dir , 
                                            "Samples",      
                                            f"sample_{self.logger.name}_Epoch_{self.current_epoch}.png"),

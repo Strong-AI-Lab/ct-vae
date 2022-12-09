@@ -8,7 +8,8 @@ from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from torchvision.datasets import CelebA
-import zipfile
+import csv
+from collections import namedtuple
 
 
 # Add your custom dataset class here
@@ -31,6 +32,71 @@ class MyCelebA(CelebA):
     Download and Extract
     URL : https://drive.google.com/file/d/1m8-EBPgi5MRubrm6iQjafK2QMHDBMSfJ/view?usp=sharing
     """
+    
+    def _check_integrity(self) -> bool:
+        return True
+        
+T_CSV = namedtuple("T_CSV", ["input", "output", "variation", "source", "target"])
+class TransitionCelebA(CelebA):
+    """
+    CelebA dataset with transitions between images with similar features.
+    """
+
+    def __init__(self, num_variations = 10, *args, **kwargs):
+        super(TransitionCelebA, self).__init__(*args, **kwargs)
+
+        variations = self._load_t_csv("variation_attrs.txt")
+
+        transitions = list(zip(variations.input, variations.output))
+        print(len(transitions), len(self.attr))
+        print(transitions[:10])
+        ids = [i for i, (inp, out) in enumerate(transitions) if inp in self.filename and out in self.filename]
+        print(len(ids))
+        self.transitions = [(inp, out) for i, (inp, out) in enumerate(transitions) if i in ids]
+        print(len(self.transitions))
+
+        self.actions = torch.zeros((len(self.transitions), 2*num_variations))
+        for i, id in enumerate(ids):
+            id_transition = self.attr_names.index(variations.variation[id])
+            direction = int(variations.target[id] < 0)
+            self.actions[i,num_variations*direction+id_transition] = 1.0
+    
+    def __getitem__(self, idx):
+        if idx < len(self.attr):
+            X, target = super(TransitionCelebA,self).__getitem__(idx)
+            options = {"mode" : "base"}
+        else:
+            if idx < len(self.attr) + len(self.transitions):
+                idx = idx - len(self.attr)
+                mode = "action"
+            else:
+                idx = idx - len(self.attr) - len(self.transitions)
+                mode = "causal"
+            x_name, y_name = self.transitions[idx]
+            X, target = super(TransitionCelebA,self).__getitem__(self.filename.index(x_name))
+            Y, _ = super(TransitionCelebA,self).__getitem__(self.filename.index(y_name))
+            action = self.actions[idx]
+            options = {"action": action, "input_y": Y, "mode": mode}
+        
+        return X, target, options
+
+    def __len__(self) -> int:
+        return len(self.attr) + 2 * len(self.transitions)
+     
+    def _load_t_csv(self, filename: str) -> T_CSV:
+        with open(os.path.join(self.root, self.base_folder, filename)) as csv_file:
+            data = list(csv.reader(csv_file))
+
+        headers = data[0]
+        data = data[1:]
+
+        inputs = [row[1] for row in data]
+        outputs = [row[2] for row in data]
+        variations = [row[3] for row in data]
+        sources = [int(row[4]) for row in data]
+        targets = [int(row[5]) for row in data]
+
+        return T_CSV(inputs, outputs, variations, sources, targets)
     
     def _check_integrity(self) -> bool:
         return True
