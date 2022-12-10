@@ -2,21 +2,24 @@ model_params:
   name: 'CTMCQVAE'
   in_channels: 3
   embedding_dim: 64
-  action_dim: 18
+  action_dim: 20
   hidden_dims: [128, 256]
   causal_hidden_dim: 800
   num_embeddings: 16
   img_size: 64
-  codebooks: 2
+  codebooks: 1
   beta: 0.25
-  causal_beta: 0.9
+  causal_alpha: 0.7
+  causal_beta: 0.4
+  causal_gamma: 0.9
 
 data_params:
   data_path: "Data/"
-  train_batch_size: 4
-  val_batch_size:  4
+  train_batch_size: 16
+  val_batch_size:  16
   patch_size: 64
   num_workers: 4
+  mode: "base"
 
 
 exp_params:
@@ -24,10 +27,10 @@ exp_params:
   weight_decay: 0.0
   scheduler_gamma: 0.98
   kld_weight: 0.00025
-  manual_seed: 1320
+  manual_seed: 1250
 
 trainer_params:
-  gpus: [1,2,4,5]
+  gpus: [0]
   max_epochs: 20
 
 logging_params:

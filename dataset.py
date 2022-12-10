@@ -42,24 +42,33 @@ class TransitionCelebA(CelebA):
     CelebA dataset with transitions between images with similar features.
     """
 
-    def __init__(self, num_variations = 10, *args, **kwargs):
+    def __init__(self, *args, num_variations = 10, **kwargs):
         super(TransitionCelebA, self).__init__(*args, **kwargs)
 
         variations = self._load_t_csv("variation_attrs.txt")
 
         transitions = list(zip(variations.input, variations.output))
-        print(len(transitions), len(self.attr))
-        print(transitions[:10])
         ids = [i for i, (inp, out) in enumerate(transitions) if inp in self.filename and out in self.filename]
-        print(len(ids))
         self.transitions = [(inp, out) for i, (inp, out) in enumerate(transitions) if i in ids]
-        print(len(self.transitions))
 
         self.actions = torch.zeros((len(self.transitions), 2*num_variations))
         for i, id in enumerate(ids):
             id_transition = self.attr_names.index(variations.variation[id])
             direction = int(variations.target[id] < 0)
             self.actions[i,num_variations*direction+id_transition] = 1.0
+
+    def subset(self, mode: str = "base"):
+        la = len(self.attr)
+        lt = len(self.transitions)
+
+        if mode == "base":
+            r = range(la)
+        elif mode == "action":
+            r = range(la, la+lt)
+        elif mode == "causal":
+            r = range(la+lt, la+2*lt)
+
+        return torch.utils.data.Subset(self,r)
     
     def __getitem__(self, idx):
         if idx < len(self.attr):
@@ -152,6 +161,7 @@ class VAEDataset(LightningDataModule):
         patch_size: Union[int, Sequence[int]] = (256, 256),
         num_workers: int = 0,
         pin_memory: bool = False,
+        mode: str = "base",
         **kwargs,
     ):
         super().__init__()
@@ -162,34 +172,9 @@ class VAEDataset(LightningDataModule):
         self.patch_size = patch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
+        self.mode = mode
 
-    def setup(self, stage: Optional[str] = None) -> None:
-#       =========================  OxfordPets Dataset  =========================
-            
-#         train_transforms = transforms.Compose([transforms.RandomHorizontalFlip(),
-#                                               transforms.CenterCrop(self.patch_size),
-# #                                               transforms.Resize(self.patch_size),
-#                                               transforms.ToTensor(),
-#                                                 transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
-        
-#         val_transforms = transforms.Compose([transforms.RandomHorizontalFlip(),
-#                                             transforms.CenterCrop(self.patch_size),
-# #                                             transforms.Resize(self.patch_size),
-#                                             transforms.ToTensor(),
-#                                               transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
-
-#         self.train_dataset = OxfordPets(
-#             self.data_dir,
-#             split='train',
-#             transform=train_transforms,
-#         )
-        
-#         self.val_dataset = OxfordPets(
-#             self.data_dir,
-#             split='val',
-#             transform=val_transforms,
-#         )
-        
+    def setup(self, stage: Optional[str] = None) -> None:   
 #       =========================  CelebA Dataset  =========================
     
         train_transforms = transforms.Compose([transforms.RandomHorizontalFlip(),
@@ -202,20 +187,22 @@ class VAEDataset(LightningDataModule):
                                             transforms.Resize(self.patch_size),
                                             transforms.ToTensor(),])
         
-        self.train_dataset = MyCelebA(
+        # self.train_dataset = MyCelebA(
+        self.train_dataset = TransitionCelebA(
             self.data_dir,
             split='train',
             transform=train_transforms,
             download=False,
-        )
+        ).subset(self.mode)
         
         # Replace CelebA with your dataset
-        self.val_dataset = MyCelebA(
+        # self.val_dataset = MyCelebA(
+        self.val_dataset = TransitionCelebA(
             self.data_dir,
             split='test',
             transform=val_transforms,
             download=False,
-        )
+        )  .subset(self.mode)   
 #       ===============================================================
         
     def train_dataloader(self) -> DataLoader:
