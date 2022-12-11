@@ -169,7 +169,7 @@ class CausalTransition(nn.Module):
         causal_graph = self.sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
-        nodes, edge_index = self.preprocess_nodes_adj(pos_latent, action, causal_graph, noise=False) # TODO: fix issue with noise, add regularization to prevent exploding gradients 
+        nodes, edge_index = self.preprocess_nodes_adj(pos_latent, action, causal_graph)
         nodes_y = self.graph_transitioner(nodes, edge_index) # [B(HW+1) x D]
         latent_y = self.postprocess_nodes(nodes_y, latent.shape) # [B x HW x D]
 
@@ -279,7 +279,7 @@ class CTMCQVAE(BaseVAE):
         modules = []
         if hidden_dims is None:
             hidden_dims = [128, 256]
-        self.nb_conv = len(hidden_dims)
+        self.nb_latents = self.img_size // 2**len(hidden_dims)
 
         # Build Encoder
         for h_dim in hidden_dims:
@@ -316,6 +316,8 @@ class CTMCQVAE(BaseVAE):
                                         codebooks,
                                         self.beta)
 
+        # self.ct_normalizer = nn.BatchNorm2d(embedding_dim//codebooks)
+        self.ct_normalizer = nn.LayerNorm((embedding_dim//codebooks, codebooks*self.nb_latents, self.nb_latents)) # [B x (D/K) x (K*H) x W]
         self.ct_layer = CausalTransition(embedding_dim//codebooks,
                                         action_dim,
                                         causal_hidden_dim,
@@ -385,6 +387,20 @@ class CTMCQVAE(BaseVAE):
         return result
 
 
+    def ct_normalize(self, x: Tensor) -> Tensor:
+        """
+        Normalizes and format the tensor for causal transition: 
+        break dimensions into K codebooks and concat blocks in sequence
+        :param z: (Tensor) [B x D x H x W]
+        :return: (Tensor) [B x (D/K) x (K*H) x W] 
+        """
+        x_shape = x.shape
+        x = x.view((x_shape[0],x_shape[1]//self.codebooks,self.codebooks*x_shape[2],x_shape[3]))
+        x = self.ct_normalizer(x)
+        return x
+
+
+
 
     def forward_base(self, input: Tensor, **kwargs) -> List[Tensor]:
         # Encoding
@@ -392,7 +408,7 @@ class CTMCQVAE(BaseVAE):
 
         # Causal Transition
         latents_shape = latents.shape
-        latents = latents.view((latents_shape[0],latents_shape[1]//self.codebooks,self.codebooks*latents_shape[2],latents_shape[3])) # [B x D x H x W] --> [B x (D/K) x (K*H) x W] (break dimensions into K codebooks and concat blocks in sequence)
+        latents = self.ct_normalize(latents) # [B x D x H x W] --> [B x (D/K) x (K*H) x W]
         latents, ct_loss = self.ct_layer(latents) # we may need to apply it either before or after full quantization
         latents = latents.reshape(latents_shape) # [B x (D/K) x (K*H) x W] --> [B x D x H x W]
 
@@ -409,7 +425,7 @@ class CTMCQVAE(BaseVAE):
         
         # Causal Transition
         latents_shape = latents.shape
-        latents = latents.view((latents_shape[0],latents_shape[1]//self.codebooks,self.codebooks*latents_shape[2],latents_shape[3])) # [B x D x H x W] --> [B x (D/K) x (K*H) x W]
+        latents = self.ct_normalize(latents) # [B x D x H x W] --> [B x (D/K) x (K*H) x W]
         latents, ct_loss = self.ct_layer.forward_action(latents, action)
         latents = latents.reshape(latents_shape) # [B x (D/K) x (K*H) x W]--> [B x D x H x W]
         
@@ -426,9 +442,8 @@ class CTMCQVAE(BaseVAE):
         latents_y = self.encode(input_y)[0]
         
         # Causal Transition
-        latents_shape = latents_x.shape
-        latents_x = latents_x.view((latents_shape[0],latents_shape[1]//self.codebooks,self.codebooks*latents_shape[2],latents_shape[3])) # [B x D x H x W] --> [B x (D/K) x (K*H) x W]
-        latents_y = latents_y.view(latents_x.shape)
+        latents_x = self.ct_normalize(latents_x) # [B x D x H x W] --> [B x (D/K) x (K*H) x W]
+        latents_y = self.ct_normalize(latents_y) # [B x D x H x W] --> [B x (D/K) x (K*H) x W]
         recons_action, ct_loss = self.ct_layer.forward_transition(latents_x, latents_y) # we may need to apply it either before or after full quantization
         
         # Decoding
@@ -490,12 +505,10 @@ class CTMCQVAE(BaseVAE):
         :param current_device: (Int) Device to run the model
         :return: (Tensor)
         """
-        nb_latents = self.img_size // 2**self.nb_conv
-
         z = torch.randn(num_samples,
                         self.embedding_dim,
-                        nb_latents,
-                        nb_latents) # [B x D x H x W]
+                        self.nb_latents,
+                        self.nb_latents) # [B x D x H x W]
 
         z = z.to(current_device)
 
@@ -519,16 +532,14 @@ class CTMCQVAE(BaseVAE):
     #     :param current_device: (Int) Device to run the model
     #     :return: (Tensor)
     #     """
-    #     nb_latents = self.img_size // 2**self.nb_conv
-
     #     z = torch.randn(1,
     #                     self.embedding_dim, # = D
-    #                     nb_latents, # = H
-    #                     nb_latents # = W
+    #                     self.nb_latents, # = H
+    #                     self.nb_latents # = W
     #                     ).repeat(num_steps * num_walks, 1, 1, 1) # = (S x W) = B
     #                     # [B x D x H x W]
         
-    #     z_dim = torch.randn((num_steps * num_walks, num_dims)).reshape((num_steps * num_walks, num_dims,1,1)).repeat(1,1,nb_latents,nb_latents) # [B x d x H x W] (num_dims=d)
+    #     z_dim = torch.randn((num_steps * num_walks, num_dims)).reshape((num_steps * num_walks, num_dims,1,1)).repeat(1,1,self.nb_latents,self.nb_latents) # [B x d x H x W] (num_dims=d)
     #     index = torch.randint(0, self.embedding_dim, (num_walks, num_dims,)).repeat_interleave(num_steps, dim=0) # [B x d]
 
     #     z[torch.arange(num_walks*num_steps).repeat_interleave(num_dims).reshape(num_walks*num_steps,num_dims),index,:,:] = z_dim # z[:,d,:,:] = z_dim
