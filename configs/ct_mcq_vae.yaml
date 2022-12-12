@@ -20,6 +20,7 @@ data_params:
   patch_size: 64
   num_workers: 4
   mode: "base"
+  noise: "off"
 
 
 exp_params:

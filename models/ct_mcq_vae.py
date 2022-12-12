@@ -43,11 +43,16 @@ class CausalTransition(nn.Module):
                  input_dim: int,
                  action_dim: int,
                  latent_dim: int = 800,
+                 noise: str = "off",
                  alpha: float = 0.7,
                  beta: float = 0.4,
                  gamma: float = 0.9,
                  **kwargs) -> None:
         """
+        :param noise: (str) Noise in the transition process. 
+                        "off": no noise is  added, default. 
+                        "exo": noise is added as an exogenous factor affecting all causal variables.
+                        "endo": noise is an extra endogenous variable in the causal graph.
         :param alpha: (float) Factor leveraging the trend towards identity behaviour when no causal changes
         :param beta: (float) Factor regularising the size of the causal graph
         :param gamma: (float) Factor leveraging the loss of the adjacency matrix coefficients
@@ -56,6 +61,7 @@ class CausalTransition(nn.Module):
         self.input_dim = input_dim
         self.action_dim = action_dim
         self.latent_dim = latent_dim
+        self.noise = noise
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
@@ -121,21 +127,31 @@ class CausalTransition(nn.Module):
         else:
             return torch.bernoulli(adjacency)
     
-    def preprocess_nodes_adj(self, latent, action, adjacency, noise=True):
-        nodes = torch.concat([latent,action.unsqueeze(1)],1).view((-1,latent.size(-1)))
-        if noise:
-            nodes = nodes + torch.normal(0,1,nodes.shape).to(latent.device)
-        padding = torch.nn.ConstantPad2d((0,1,0,1),1) 
+    def preprocess_nodes_adj(self, latent, action, adjacency):
+        if self.noise == "exo":
+            latent = latent + torch.normal(0,1,latent.shape).to(latent.device) # noise integrated to variables
+            padding = torch.nn.ConstantPad2d((0,1,0,1),1) 
+            var_supp = action.unsqueeze(1)
+        elif self.noise == "endo":
+            padding = torch.nn.ConstantPad2d((0,2,0,2),1) # noise as extra variable
+            var_supp = torch.stack([action, torch.normal(0,1,action.shape).to(action.device)])
+        else:
+            padding = torch.nn.ConstantPad2d((0,1,0,1),1) 
+            var_supp = action.unsqueeze(1)
+
+        nodes = torch.concat([latent,var_supp],1).view((-1,latent.size(-1)))
         padded_adjacency = padding(adjacency) # add missing edges to action
 
         edge_index, _ = torch_geometric.utils.dense_to_sparse(padded_adjacency) # format to edge_index
         return nodes, edge_index # [BHW x D], [2 x E]
 
     def postprocess_nodes(self, nodes, latent_shape):
-        action_latent_shape = list(latent_shape) # [B x HW x D]
-        action_latent_shape[1] += 1 # [B x (HW+1) x D]
+        var_supp_size = 2 if self.noise == "endo" else 1
 
-        return nodes.view((action_latent_shape))[:,:-1,:] # [B x HW x D] (remove action nodes) 
+        action_latent_shape = list(latent_shape) # [B x HW x D]
+        action_latent_shape[1] += var_supp_size # [B x (HW+vs) x D]
+
+        return nodes.view((action_latent_shape))[:,:-var_supp_size,:] # [B x HW x D] (remove action nodes) 
 
     def infer_action(self, adjacency_coeffs, latent, differentiable=True):
         a = F.one_hot(torch.arange(self.action_dim).repeat(latent.size(0))).view((latent.size(0),self.action_dim,self.action_dim)).to(latent.device, dtype=latent.dtype) # [B x A x A]
@@ -260,6 +276,7 @@ class CTMCQVAE(BaseVAE):
                  num_embeddings: int,
                  hidden_dims: List = None,
                  causal_hidden_dim: int = 800,
+                 noise: str = "off",
                  beta: float = 0.25,
                  causal_alpha: float = 0.7,
                  causal_beta: float = 0.4,
@@ -321,6 +338,7 @@ class CTMCQVAE(BaseVAE):
         self.ct_layer = CausalTransition(embedding_dim//codebooks,
                                         action_dim,
                                         causal_hidden_dim,
+                                        noise,
                                         causal_alpha,
                                         causal_beta,
                                         causal_gamma)
