@@ -36,7 +36,7 @@ class MyCelebA(CelebA):
     def _check_integrity(self) -> bool:
         return True
         
-T_CSV = namedtuple("T_CSV", ["input", "output", "variation", "source", "target"])
+T_CSV = namedtuple("T_CSV", ["input", "output", "variation", "source", "target", "split"])
 class TransitionCelebA(CelebA):
     """
     CelebA dataset with transitions between images with similar features.
@@ -46,9 +46,16 @@ class TransitionCelebA(CelebA):
         super(TransitionCelebA, self).__init__(*args, **kwargs)
 
         variations = self._load_t_csv("variation_attrs.txt")
+        split_map = {
+            "train": [0],
+            "valid": [1],
+            "test": [2],
+            "all": [0,1,2]
+        }
+        current_split = split_map[self.split]
+        ids = [i for i, id in enumerate(variations.split) if id in current_split]
 
         transitions = list(zip(variations.input, variations.output))
-        ids = [i for i, (inp, out) in enumerate(transitions) if inp in self.filename and out in self.filename]
         self.transitions = [(inp, out) for i, (inp, out) in enumerate(transitions) if i in ids]
 
         self.actions = torch.zeros((len(self.transitions), 2*num_variations))
@@ -104,8 +111,9 @@ class TransitionCelebA(CelebA):
         variations = [row[3] for row in data]
         sources = [int(row[4]) for row in data]
         targets = [int(row[5]) for row in data]
+        splits = [int(row[6]) for row in data]
 
-        return T_CSV(inputs, outputs, variations, sources, targets)
+        return T_CSV(inputs, outputs, variations, sources, targets, splits)
     
     def _check_integrity(self) -> bool:
         return True
