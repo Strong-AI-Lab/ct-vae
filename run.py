@@ -53,7 +53,7 @@ runner = Trainer(logger=tb_logger,
                                      monitor= "val_loss",
                                      save_last= True),
                  ],
-                 strategy=DDPPlugin(find_unused_parameters=True),
+                 strategy=DDPPlugin(find_unused_parameters=config['exp_params']['find_unused_parameters']),
                  **config['trainer_params'])
 
 

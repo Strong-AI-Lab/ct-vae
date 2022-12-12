@@ -28,6 +28,7 @@ exp_params:
   scheduler_gamma: 0.98
   kld_weight: 0.00025
   manual_seed: 1250
+  find_unused_parameters: False
 
 trainer_params:
   gpus: [0]
