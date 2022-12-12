@@ -47,15 +47,19 @@ class CausalTransition(nn.Module):
                  alpha: float = 0.7,
                  beta: float = 0.4,
                  gamma: float = 0.9,
+                 comp_adj_optim: str = "comp",
                  **kwargs) -> None:
         """
         :param noise: (str) Noise in the transition process. 
                         "off": no noise is  added, default. 
                         "exo": noise is added as an exogenous factor affecting all causal variables.
                         "endo": noise is an extra endogenous variable in the causal graph.
-        :param alpha: (float) Factor leveraging the trend towards identity behaviour when no causal changes
-        :param beta: (float) Factor regularising the size of the causal graph
-        :param gamma: (float) Factor leveraging the loss of the adjacency matrix coefficients
+        :param alpha: (float) Factor leveraging the trend towards identity behaviour when no causal changes.
+        :param beta: (float) Factor regularising the size of the causal graph.
+        :param gamma: (float) Factor leveraging the loss of the adjacency matrix coefficients.
+        :param comp_adj_optim: (str) Computation tradeoff for graph discovery optimization. 
+                        "comp": All variables are loaded in memory at once, reducing the number of computations needed but needing a higher amount of memory, default. 
+                        "mem": One variable is loaded at a time, reducing the memory consumption but needing more computations, increasing the time and the size of the computation graph. 
         """
         super(CausalTransition, self).__init__()
         self.input_dim = input_dim
@@ -65,6 +69,7 @@ class CausalTransition(nn.Module):
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
+        self.comp_adj_optim = self.compute_adj__mem_optim if comp_adj_optim == "mem" else self.compute_adj__comp_optim
 
         self.a_dense = nn.Linear(action_dim, input_dim)
 
@@ -86,24 +91,27 @@ class CausalTransition(nn.Module):
                 )
             })
 
-        self.graph_transitioner = gnn.Sequential('x, edge_index', [
-                                    (gnn.GATv2Conv(input_dim, latent_dim), 'x, edge_index -> x'),
+        self.graph_transitioner = gnn.Sequential('x, edge_index, edge_attr', [
+                                    (gnn.GATv2Conv(input_dim, latent_dim, edge_dim=1), 'x, edge_index, edge_attr -> x'),
                                     nn.ReLU(inplace=True),
                                     nn.Linear(latent_dim, input_dim),
                                 ])
 
-    # def compute_adj_big(self, latent, action, mode = "a"): # /!\ not tractable!
-    #     repeats = latent.size(1)
-    #     nodes_i = latent.repeat(1,1,repeats).view((latent.size(0),-1,latent.size(2)))
-    #     nodes_j = latent.repeat(1,repeats,1)
+    def compute_adj__comp_optim(self, latent, aux, mode = "a"): # /!\ big memory needed!
+        repeats = latent.size(1)
+        nodes_i = latent.repeat(1,1,repeats).view((latent.size(0),-1,latent.size(2))) # [B x HW x D] --> [B x HWHW x D]
+        nodes_j = latent.repeat(1,repeats,1) # [B x HW x D] --> [B x HWHW x D]
         
-    #     action = action.view((nodes_i.size(0),1,nodes_i.size(2))).repeat(1,nodes_i.size(1),1).view(nodes_i.shape) # [B x D] --> [B x HW x D]
-
-    #     inp = torch.concat([nodes_i,nodes_j, action],-1)
-    #     coeffs = self.graph_discovers[mode](inp).view((-1,repeats,repeats)) # [B x HW x HW]
-    #     return coeffs
+        if mode == "a":
+            aux = aux.unsqueeze(1).repeat(1,nodes_i.size(1),1).view(nodes_i.shape) # [B x D] --> [B x HW x D]
+        else:
+            aux = aux.repeat(1,1,repeats).view((latent.size(0),-1,latent.size(2))) # [B x HW x D] --> [B x HWHW x D]
+            
+        inp = torch.concat([nodes_i,nodes_j, aux],-1)
+        coeffs = self.graph_discovers[mode](inp).view((-1,repeats,repeats)) # [B x HW x HW]
+        return coeffs
     
-    def compute_adj(self, latent, aux, mode = "a"):
+    def compute_adj__mem_optim(self, latent, aux, mode = "a"): # /!\ very big computation graph!
         repeats = latent.size(1)
         
         if mode == "a":
@@ -113,11 +121,15 @@ class CausalTransition(nn.Module):
 
         for i in range(repeats):
             nodes_i = latent[:,i,:].unsqueeze(1).repeat(1,repeats,1)
+            aux_i = aux[:,i,:].unsqueeze(1).repeat(1,repeats,1)
             nodes_j = latent
-            inp = torch.concat([nodes_i, nodes_j, aux],-1)
+            inp = torch.concat([nodes_i, nodes_j, aux_i],-1)
             coeffs[:,i] = self.graph_discovers[mode](inp).view((latent.size(0), repeats))
             
         return coeffs
+
+    def compute_adj(self, latent, aux, mode = "a"):
+        return self.comp_adj_optim(latent, aux, mode)
 
 
     def sample_bernoulli(self, adjacency, differentiable=True):
@@ -127,31 +139,36 @@ class CausalTransition(nn.Module):
         else:
             return torch.bernoulli(adjacency)
     
-    def preprocess_nodes_adj(self, latent, action, adjacency):
+
+    def compute_y(self, latent, action, adjacency):
+        # preprocess
         if self.noise == "exo":
             latent = latent + torch.normal(0,1,latent.shape).to(latent.device) # noise integrated to variables
             padding = torch.nn.ConstantPad2d((0,1,0,1),1) 
             var_supp = action.unsqueeze(1)
         elif self.noise == "endo":
             padding = torch.nn.ConstantPad2d((0,2,0,2),1) # noise as extra variable
-            var_supp = torch.stack([action, torch.normal(0,1,action.shape).to(action.device)])
+            var_supp = torch.stack([action, torch.normal(0,1,action.shape).to(action.device)],dim=1)
         else:
             padding = torch.nn.ConstantPad2d((0,1,0,1),1) 
             var_supp = action.unsqueeze(1)
-
-        nodes = torch.concat([latent,var_supp],1).view((-1,latent.size(-1)))
+            
+        nodes = torch.concat([latent,var_supp],1).view((-1,latent.size(-1))) # [(BHW+vs) x D]
         padded_adjacency = padding(adjacency) # add missing edges to action
 
-        edge_index, _ = torch_geometric.utils.dense_to_sparse(padded_adjacency) # format to edge_index
-        return nodes, edge_index # [BHW x D], [2 x E]
-
-    def postprocess_nodes(self, nodes, latent_shape):
-        var_supp_size = 2 if self.noise == "endo" else 1
-
-        action_latent_shape = list(latent_shape) # [B x HW x D]
+        edge_index, _ = torch_geometric.utils.dense_to_sparse(padded_adjacency) # format to edge_index [2 x E]
+        edge_attrs = padded_adjacency[torch.where(padded_adjacency==1)].unsqueeze(1) # needed for backpropagation to adjacency [E x 1]
+        
+        # Graph Neural Network computation
+        nodes_y = self.graph_transitioner(nodes, edge_index, edge_attr=edge_attrs) # [B(HW+vs) x D]
+        
+        # postprocess
+        var_supp_size = var_supp.size(1)
+        action_latent_shape = list(latent.shape) # [B x HW x D]
         action_latent_shape[1] += var_supp_size # [B x (HW+vs) x D]
 
-        return nodes.view((action_latent_shape))[:,:-var_supp_size,:] # [B x HW x D] (remove action nodes) 
+        return nodes_y.view((action_latent_shape))[:,:-var_supp_size,:] # [B x HW x D] (remove action and noise nodes) 
+
 
     def infer_action(self, adjacency_coeffs, latent, differentiable=True):
         a = F.one_hot(torch.arange(self.action_dim).repeat(latent.size(0))).view((latent.size(0),self.action_dim,self.action_dim)).to(latent.device, dtype=latent.dtype) # [B x A x A]
@@ -185,14 +202,12 @@ class CausalTransition(nn.Module):
         causal_graph = self.sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
-        nodes, edge_index = self.preprocess_nodes_adj(pos_latent, action, causal_graph)
-        nodes_y = self.graph_transitioner(nodes, edge_index) # [B(HW+1) x D]
-        latent_y = self.postprocess_nodes(nodes_y, latent.shape) # [B x HW x D]
+        latent_y = self.compute_y(pos_latent, action, causal_graph) # [B x HW x D]
 
         # Compute loss function
         id_matrix = F.one_hot(torch.arange(causal_graph.size(-1)).repeat(causal_graph.size(0),1)).to(latent.device, dtype=latent.dtype)
         ct_loss = self.alpha * (
-                    F.mse_loss(latent, self.postprocess_nodes(self.graph_transitioner(*self.preprocess_nodes_adj(pos_latent, action, id_matrix)), latent.shape)) 
+                    F.mse_loss(latent, self.compute_y(pos_latent, action, id_matrix))
                     + F.mse_loss(id_matrix, causal_graph)
                 ) + self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, latent_y, "y")
         
@@ -212,9 +227,7 @@ class CausalTransition(nn.Module):
         causal_graph = self.sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
-        nodes, edge_index = self.preprocess_nodes_adj(pos_latent, action, causal_graph)
-        nodes_y = self.graph_transitioner(nodes, edge_index) # [B(HW+1) x D]
-        latent_y = self.postprocess_nodes(nodes_y, latent.shape) # [B x HW x D]
+        latent_y = self.compute_y(pos_latent, action, causal_graph) # [B x HW x D]
 
         # Compute loss function
         ct_loss = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, latent_y, "y") + self.beta * self.graph_size_loss(causal_graph)
@@ -283,6 +296,7 @@ class CTMCQVAE(BaseVAE):
                  causal_gamma: float = 0.9,
                  img_size: int = 64,
                  codebooks:int = 1,
+                 comp_adj_optim: str = "comp",
                  **kwargs) -> None:
         super(CTMCQVAE, self).__init__()
 
@@ -341,7 +355,8 @@ class CTMCQVAE(BaseVAE):
                                         noise,
                                         causal_alpha,
                                         causal_beta,
-                                        causal_gamma)
+                                        causal_gamma,
+                                        comp_adj_optim)
 
         # Build Decoder
         modules = []
