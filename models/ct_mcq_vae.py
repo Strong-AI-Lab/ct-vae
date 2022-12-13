@@ -9,6 +9,16 @@ import math
 from typing import Union, List
 
 
+
+def detach_and_paste(func):
+    def inner(_self: nn.Module, x : Tensor, *args, **kwargs):
+        # y, *remain = func(_self, x, *args, **kwargs)
+        y, *remain = func(_self, x.detach(), *args, **kwargs)
+        return x + (y - x).detach(), *remain
+    return inner
+
+
+
 class PositionalEncoding(nn.Module):
     """
     Inspired by <https://pytorch.org/tutorials/beginner/transformer_tutorial.html>
@@ -44,9 +54,10 @@ class CausalTransition(nn.Module):
                  action_dim: int,
                  latent_dim: int = 800,
                  noise: str = "off",
-                 alpha: float = 0.7,
-                 beta: float = 0.4,
-                 gamma: float = 0.9,
+                 c_alpha: float = 0.7,
+                 c_beta: float = 0.4,
+                 c_gamma: float = 0.9,
+                 c_epsilon: float = 0.4,
                  comp_adj_optim: str = "comp",
                  **kwargs) -> None:
         """
@@ -54,9 +65,10 @@ class CausalTransition(nn.Module):
                         "off": no noise is  added, default. 
                         "exo": noise is added as an exogenous factor affecting all causal variables.
                         "endo": noise is an extra endogenous variable in the causal graph.
-        :param alpha: (float) Factor leveraging the trend towards identity behaviour when no causal changes.
-        :param beta: (float) Factor regularising the size of the causal graph.
-        :param gamma: (float) Factor leveraging the loss of the adjacency matrix coefficients.
+        :param c_alpha: (float) Factor leveraging the trend towards identity behaviour when no causal changes.
+        :param c_beta: (float) Factor regularising the size of the causal graph.
+        :param c_gamma: (float) Factor leveraging the loss of the adjacency matrix coefficients.
+        :param c_epsilon: (float) Factor leveraging the confidence that the learned adjacency matrix is not empty
         :param comp_adj_optim: (str) Computation tradeoff for graph discovery optimization. 
                         "comp": All variables are loaded in memory at once, reducing the number of computations needed but needing a higher amount of memory, default. 
                         "mem": One variable is loaded at a time, reducing the memory consumption but needing more computations, increasing the time and the size of the computation graph. 
@@ -66,9 +78,10 @@ class CausalTransition(nn.Module):
         self.action_dim = action_dim
         self.latent_dim = latent_dim
         self.noise = noise
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
+        self.alpha = c_alpha
+        self.beta = c_beta
+        self.gamma = c_gamma
+        self.epsilon = c_epsilon
         self.comp_adj_optim = self.compute_adj__mem_optim if comp_adj_optim == "mem" else self.compute_adj__comp_optim
 
         self.a_dense = nn.Linear(action_dim, input_dim)
@@ -134,7 +147,7 @@ class CausalTransition(nn.Module):
 
     def sample_bernoulli(self, adjacency, differentiable=True):
         if differentiable: # reparametrization trick using Straight-through Gumbel-Softmax
-            logits = torch.log(torch.stack([1-adjacency,adjacency],dim=-1))
+            logits = torch.log(torch.stack([1-adjacency,adjacency],dim=-1).clamp(min=1e-4)) # clamp to avoid -inf values
             return F.gumbel_softmax(logits,tau=1,hard=True)[...,1]
         else:
             return torch.bernoulli(adjacency)
@@ -156,8 +169,7 @@ class CausalTransition(nn.Module):
         nodes = torch.concat([latent,var_supp],1).view((-1,latent.size(-1))) # [(BHW+vs) x D]
         padded_adjacency = padding(adjacency) # add missing edges to action
 
-        edge_index, _ = torch_geometric.utils.dense_to_sparse(padded_adjacency) # format to edge_index [2 x E]
-        edge_attrs = padded_adjacency[torch.where(padded_adjacency==1)].unsqueeze(1) # needed for backpropagation to adjacency [E x 1]
+        edge_index, edge_attrs = torch_geometric.utils.dense_to_sparse(padded_adjacency) # format to edge_index [2 x E] and edge_attrs [E x 1] 
         
         # Graph Neural Network computation
         nodes_y = self.graph_transitioner(nodes, edge_index, edge_attr=edge_attrs) # [B(HW+vs) x D]
@@ -178,6 +190,7 @@ class CausalTransition(nn.Module):
         distances = torch.zeros((a.size(1),self.action_dim)).to(a.device) # [B x A]
         for i in range(self.action_dim):
             adj_i = self.compute_adj(latent, a[i], "a")
+            adj_i = adj_i.detach().clone() # prevents backpropagation
             distances[:,i] = F.pairwise_distance(adjacency_coeffs.view((a.size(1), -1)), adj_i.view((a.size(1), -1)))
         probas = 1-torch.softmax(distances,dim=-1)
         
@@ -190,6 +203,7 @@ class CausalTransition(nn.Module):
         return actions # [B x A]
 
 
+    # @detach_and_paste
     def forward(self, latent: Tensor, **kwargs) -> List[Tensor]:
         latent_shape = latent.shape # [B x D x H x W]
         latent = latent.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]
@@ -209,12 +223,13 @@ class CausalTransition(nn.Module):
         ct_loss = self.alpha * (
                     F.mse_loss(latent, self.compute_y(pos_latent, action, id_matrix))
                     + F.mse_loss(id_matrix, causal_graph)
-                ) + self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, latent_y, "y")
+                ) + self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, latent_y, "y") + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
         latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x D x H x W]
         return [latent_y, ct_loss]
 
 
+    # @detach_and_paste
     def forward_action(self, latent: Tensor, action: Tensor, **kwargs) -> List[Tensor]:
         latent_shape = latent.shape # [B x D x H x W]
         latent = latent.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]
@@ -230,12 +245,13 @@ class CausalTransition(nn.Module):
         latent_y = self.compute_y(pos_latent, action, causal_graph) # [B x HW x D]
 
         # Compute loss function
-        ct_loss = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, latent_y, "y") + self.beta * self.graph_size_loss(causal_graph)
+        ct_loss = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, latent_y, "y") + self.beta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
         latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x H x W x D]
         return [latent_y, ct_loss]
 
     
+    # no @detach_and_paste since causal model also acts as decoder for this setting
     def forward_transition(self, latent: Tensor, latent_y: Tensor, **kwargs) -> List[Tensor]:
         latent_shape = latent.shape # [B x D x H x W]
         latent = latent.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]
@@ -251,7 +267,7 @@ class CausalTransition(nn.Module):
 
         # Compute loss function
         causal_graph = self.sample_bernoulli(adjacency_coeffs)
-        ct_loss = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, self.a_dense(action), "a") + self.beta * self.graph_size_loss(causal_graph)
+        ct_loss = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, self.a_dense(action), "a") + self.beta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
 
         return [action, ct_loss]
     
@@ -276,6 +292,9 @@ class CausalTransition(nn.Module):
 
     def graph_size_loss(self, causal_graph):
         return torch.linalg.norm(causal_graph)
+    
+    def positive_trial_loss(self, adjacency_coeffs):
+        return torch.linalg.norm((1-adjacency_coeffs).prod(1))
 
 
 
@@ -289,14 +308,9 @@ class CTMCQVAE(BaseVAE):
                  num_embeddings: int,
                  hidden_dims: List = None,
                  causal_hidden_dim: int = 800,
-                 noise: str = "off",
                  beta: float = 0.25,
-                 causal_alpha: float = 0.7,
-                 causal_beta: float = 0.4,
-                 causal_gamma: float = 0.9,
                  img_size: int = 64,
                  codebooks:int = 1,
-                 comp_adj_optim: str = "comp",
                  **kwargs) -> None:
         super(CTMCQVAE, self).__init__()
 
@@ -352,11 +366,7 @@ class CTMCQVAE(BaseVAE):
         self.ct_layer = CausalTransition(embedding_dim//codebooks,
                                         action_dim,
                                         causal_hidden_dim,
-                                        noise,
-                                        causal_alpha,
-                                        causal_beta,
-                                        causal_gamma,
-                                        comp_adj_optim)
+                                        **kwargs)
 
         # Build Decoder
         modules = []
