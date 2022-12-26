@@ -2,26 +2,28 @@ model_params:
   name: 'CTMCQVAE'
   in_channels: 3
   embedding_dim: 64
-  action_dim: 20
+  action_dim: 6
   hidden_dims: [64, 128, 256]
   causal_hidden_dim: 800
   num_embeddings: 16
   img_size: 64
   codebooks: 1
   beta: 0.25
-  c_alpha: 0.07
-  c_beta: 0.02
-  c_gamma: 0.09
-  c_epsilon: 0.02
+  c_alpha: 0.5
+  c_beta: 0.1
+  c_gamma: 0.4
+  c_epsilon: 0.2
+  noise: "endo"
 
 data_params:
   data_path: "Data/"
+  dataset_name: "TCars3D"
   train_batch_size: 16
   val_batch_size:  16
   patch_size: 64
   num_workers: 4
-  mode: "base"
-  noise: "off"
+  mode: ["base","base","action","causal"]
+  limit: 10000
 
 
 exp_params:
