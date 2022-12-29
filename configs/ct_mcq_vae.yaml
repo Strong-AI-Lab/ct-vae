@@ -27,6 +27,7 @@ data_params:
 
 
 exp_params:
+  # metrics: ["DCI", "MIG", "SAP", "FactorVaeScore"]
   LR: 0.0005
   weight_decay: 0.0
   scheduler_gamma: 0.98

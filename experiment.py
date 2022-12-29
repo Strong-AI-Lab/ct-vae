@@ -3,6 +3,7 @@ import math
 import torch
 from torch import optim
 from models import BaseVAE
+from metrics import Metric
 from models.types_ import *
 from utils import data_loader
 import pytorch_lightning as pl
@@ -16,10 +17,13 @@ class VAEXperiment(pl.LightningModule):
 
     def __init__(self,
                  vae_model: BaseVAE,
-                 params: dict) -> None:
+                 train_metric: Metric,
+                 val_metric: Metric,
         super(VAEXperiment, self).__init__()
 
         self.model = vae_model
+        self.train_metric = train_metric
+        self.val_metric = val_metric
         self.params = params
         self.curr_device = None
         self.hold_graph = False
@@ -42,8 +46,9 @@ class VAEXperiment(pl.LightningModule):
                                               M_N = self.params['kld_weight'], #al_img.shape[0]/ self.num_train_imgs,
                                               optimizer_idx=optimizer_idx,
                                               batch_idx = batch_idx)
-
-        self.log_dict({key: val.item() for key, val in train_loss.items()}, sync_dist=True, batch_size=real_img.size(0))
+        train_metric = {} if self.train_metric is None else {key: torch.tensor(val, dtype=torch.float32) for key, val in self.train_metric.compute(self.metric_func).items()}
+        
+        self.log_dict({**{key: val.item() for key, val in train_loss.items()}, **train_metric}, sync_dist=True, batch_size=real_img.size(0))
 
         return train_loss['loss']
 
@@ -58,13 +63,19 @@ class VAEXperiment(pl.LightningModule):
                                             M_N = 1.0, #real_img.shape[0]/ self.num_val_imgs,
                                             optimizer_idx = optimizer_idx,
                                             batch_idx = batch_idx)
-
-        self.log_dict({f"val_{key}": val.item() for key, val in val_loss.items()}, sync_dist=True, batch_size=real_img.size(0))
+        test_metric = {} if self.val_metric is None else {key: torch.tensor(val, dtype=torch.float32) for key, val in self.val_metric.compute(self.metric_func).items()}
+        
+        self.log_dict({**{f"val_{key}": val.item() for key, val in val_loss.items()}, **test_metric}, sync_dist=True, batch_size=real_img.size(0))
 
         
     def on_validation_end(self) -> None:
         self.sample_images()
-        
+    
+    def metric_func(self, x: Tensor) -> Tensor:
+        x = x.to(next(self.model.parameters()).device)
+        x = self.model.encode(x)[0]
+        x = x.view(x.size(0),-1)
+        return x
     def sample_images(self):
         # Get sample reconstruction image            
         test_input, test_label, *args = next(iter(self.trainer.datamodule.test_dataloader()))

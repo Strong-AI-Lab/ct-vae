@@ -40,6 +40,7 @@ class DisentLibDataset(Dataset):
         self.base_folder = dataset_name
 
         data = DisentDataset(DisentLibDataset.DATASETS[dataset_name](data_root=data_dir,prepare=True,transform=transform), return_factors=True)
+        self._full_data = data
 
         if split == "all":
             self.indices = list(map(str, splits.index))
