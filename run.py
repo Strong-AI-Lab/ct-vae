@@ -11,7 +11,7 @@ from experiment import VAEXperiment
 
 import torch.backends.cudnn as cudnn
 from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from pytorch_lightning.utilities.seed import seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from dataset import VAEDataset
@@ -33,11 +33,16 @@ with open(args.filename, 'r') as file:
         print(exc)
 
 
+# Loggers
 tb_logger =  TensorBoardLogger(save_dir=config['logging_params']['save_dir'],
                                name=config['logging_params']['name'],)
 
+wb_logger = WandbLogger(project="CT-VAE",
+                        name=config['logging_params']['name'])
+                    
 # Save hyperparameters
 tb_logger.log_hyperparams(config)
+wb_logger.log_hyperparams(config)
 
 # For reproducibility
 seed_everything(config['exp_params']['manual_seed'], True)
@@ -46,6 +51,8 @@ seed_everything(config['exp_params']['manual_seed'], True)
 # Build model
 model = vae_models[config['model_params']['name']](**config['model_params'])
 
+# Gradient tracking
+wb_logger.watch(model, log_freq=500)  
 
 
 # Data
@@ -75,7 +82,7 @@ experiment = VAEXperiment(model,
                           val_sampling=True)
 
 
-runner = Trainer(logger=tb_logger,
+runner = Trainer(logger=[tb_logger, wb_logger],
                  callbacks=[
                      LearningRateMonitor(),
                      ModelCheckpoint(save_top_k=2, 
