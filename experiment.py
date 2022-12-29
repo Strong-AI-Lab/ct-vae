@@ -19,11 +19,14 @@ class VAEXperiment(pl.LightningModule):
                  vae_model: BaseVAE,
                  train_metric: Metric,
                  val_metric: Metric,
+                 params: dict,
+                 val_sampling: bool = True) -> None:
         super(VAEXperiment, self).__init__()
 
         self.model = vae_model
         self.train_metric = train_metric
         self.val_metric = val_metric
+        self.val_sampling = val_sampling
         self.params = params
         self.curr_device = None
         self.hold_graph = False
@@ -69,7 +72,8 @@ class VAEXperiment(pl.LightningModule):
 
         
     def on_validation_end(self) -> None:
-        self.sample_images()
+        if self.val_sampling:
+            self.sample_images()
     
     def metric_func(self, x: Tensor) -> Tensor:
         x = x.to(next(self.model.parameters()).device)

@@ -1,0 +1,54 @@
+model_params:
+  name: 'CTMCQVAE'
+  in_channels: 3
+  embedding_dim: [32, 64]
+  action_dim: 6
+  hidden_dims: [[128, 256], [64, 128, 256], [128, 256, 512]]
+  causal_hidden_dim: [400, 800, 1200, 1600]
+  num_embeddings: [16, 32, 64, 128]
+  img_size: 64
+  codebooks: [1, 2, 4]
+  beta: !!python/tuple [0.1, 0.9]
+  c_alpha: !!python/tuple [0.1, 0.9]
+  c_beta: !!python/tuple [0.1, 0.9]
+  c_gamma: !!python/tuple [0.1, 0.9]
+  c_epsilon: !!python/tuple [0.1, 0.9]
+  noise: ["off", "endo", "exo"]
+
+data_params:
+  data_path: "/home/ggen187/Documents/projects/arc/PyTorch-VAE/Data/"
+  dataset_name: "TCars3D"
+  train_batch_size: [4, 8, 16, 32, 64]
+  val_batch_size: [4, 8, 16, 32, 64]
+  patch_size: 64
+  num_workers: 4
+  mode: ["base", "action","causal"]
+  limit: [100, 500, 1000, 5000, 10000]
+
+
+exp_params:
+  LR: !!python/tuple [0.0001, 0.1]
+  weight_decay: !!python/tuple [0.0, 0.001]
+  scheduler_gamma: !!python/tuple [0.9, 0.999]
+  kld_weight: 0.00025
+  manual_seed: 1250
+  find_unused_parameters: False
+
+trainer_params:
+  gpus: [0] # must be set according to the number of gpus per trial (e.g. if 1 gpu per trial, set [0], if 2 gpus, set [0,1])
+  max_epochs: 10
+
+logging_params:
+  save_dir: "logs/"
+  name: 'CTMCQVAE'
+
+hyperparameter_search:
+  num_samples: 4
+  resources_per_trial: # unlike in the 'run' script, the ray library cannot restrict gpu use, need to set environment variable: CUDA_VISIBLE_DEVICES
+    cpu: 1
+    gpu: 1
+  params:
+    model_params: ["embedding_dim", "hidden_dims", "causal_hidden_dim", "num_embeddings", "codebooks", "beta", "c_alpha", "c_beta", "c_gamma", "c_epsilon", "noise"]
+    data_params: ["train_batch_size", "val_batch_size", "limit"]
+    exp_params: ["LR", "weight_decay", "scheduler_gamma"]
+
