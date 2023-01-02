@@ -3,27 +3,27 @@ model_params:
   in_channels: 3
   embedding_dim: 64
   action_dim: 6
-  hidden_dims: [64, 128, 256]
+  hidden_dims: [128, 256]
   causal_hidden_dim: 800
-  num_embeddings: 16
+  num_embeddings: 32
   img_size: 64
   codebooks: 1
   beta: 0.25
-  c_alpha: 0.5
-  c_beta: 0.1
-  c_gamma: 0.4
-  c_epsilon: 0.2
+  c_alpha: 0.4
+  c_beta: 0.5
+  c_gamma: 0.3
+  c_delta: 0.1
+  c_epsilon: 0.1
   noise: "endo"
 
 data_params:
   data_path: "Data/"
   dataset_name: "TCars3D"
   train_batch_size: 16
-  val_batch_size:  16
+  val_batch_size: 16
   patch_size: 64
   num_workers: 4
-  mode: ["base","base","action","causal"]
-  limit: 10000
+  mode: ["causal", "base", "action"]
 
 
 exp_params:
@@ -33,7 +33,7 @@ exp_params:
   scheduler_gamma: 0.98
   kld_weight: 0.00025
   manual_seed: 1250
-  find_unused_parameters: False
+  find_unused_parameters: True
 
 trainer_params:
   gpus: [0]

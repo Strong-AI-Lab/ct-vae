@@ -57,6 +57,7 @@ class CausalTransition(nn.Module):
                  c_alpha: float = 0.7,
                  c_beta: float = 0.4,
                  c_gamma: float = 0.9,
+                 c_delta: float = 0.4,
                  c_epsilon: float = 0.4,
                  comp_adj_optim: str = "comp",
                  **kwargs) -> None:
@@ -66,8 +67,9 @@ class CausalTransition(nn.Module):
                         "exo": noise is added as an exogenous factor affecting all causal variables.
                         "endo": noise is an extra endogenous variable in the causal graph.
         :param c_alpha: (float) Factor leveraging the trend towards identity behaviour when no causal changes.
-        :param c_beta: (float) Factor regularising the size of the causal graph.
+        :param c_beta: (float) Variational loss.
         :param c_gamma: (float) Factor leveraging the loss of the adjacency matrix coefficients.
+        :param c_delta: (float) Factor regularising the size of the causal graph.
         :param c_epsilon: (float) Factor leveraging the confidence that the learned adjacency matrix is not empty
         :param comp_adj_optim: (str) Computation tradeoff for graph discovery optimization. 
                         "comp": All variables are loaded in memory at once, reducing the number of computations needed but needing a higher amount of memory, default. 
@@ -81,71 +83,128 @@ class CausalTransition(nn.Module):
         self.alpha = c_alpha
         self.beta = c_beta
         self.gamma = c_gamma
+        self.delta = c_delta
         self.epsilon = c_epsilon
-        self.comp_adj_optim = self.compute_adj__mem_optim if comp_adj_optim == "mem" else self.compute_adj__comp_optim
+        self.comp_adj_optim = self._compute_adj__mem_optim if comp_adj_optim == "mem" else self._compute_adj__comp_optim
 
-        self.a_dense = nn.Linear(action_dim, input_dim)
+        self.a_dense = nn.Linear(action_dim, input_dim) # Action formatting for computation along other causal variables
 
-        self.pos_encoding = PositionalEncoding(input_dim)
+        self.pos_encoding = PositionalEncoding(input_dim) # Positional encodingfor causal variables
+
+        a_discovers = []
+        for _ in range(action_dim + 1):
+            a_discovers.append(
+                    nn.Sequential(
+                    nn.Linear(2 * input_dim, latent_dim),
+                    nn.LeakyReLU(),
+                    nn.Linear(latent_dim, 1),
+                    nn.Sigmoid()
+                    ))
+        
+        y_discovers = []
+        for _ in range(input_dim + 1):
+            y_discovers.append(
+                    nn.Sequential(
+                    nn.Linear(2 * input_dim, latent_dim),
+                    nn.LeakyReLU(),
+                    nn.Linear(latent_dim, 1),
+                    nn.Sigmoid()
+                    ))
 
         self.graph_discovers = nn.ModuleDict({
-                "a" : nn.Sequential(
-                nn.Linear(3 * input_dim, latent_dim),
-                nn.LeakyReLU(),
-                nn.Linear(latent_dim, 1),
-                nn.Sigmoid()
-                ),
+                "a" : nn.ModuleList(a_discovers), # Computation of adjacency matrix coefficients in action mode
+                "y" : nn.ModuleList(y_discovers) # Computation of adjacency matrix coefficients in causal mode
+            })
 
+        self.masks = nn.ModuleDict({
+                "a" : nn.Sequential(
+                        nn.Linear(action_dim + 1, input_dim),
+                        nn.Sigmoid()
+                    ), # Action intervention masking, selects adjacency matrix discoverer corresponding to action a
                 "y" : nn.Sequential(
-                nn.Linear(3 * input_dim, latent_dim),
-                nn.LeakyReLU(),
-                nn.Linear(latent_dim, 1),
-                nn.Sigmoid()
-                )
+                        nn.Linear(input_dim + 1, input_dim),
+                        nn.Sigmoid()
+                    ) # Causal intervention masking, selects adjacency matrix discoverer corresponding to output y
             })
 
         self.graph_transitioner = gnn.Sequential('x, edge_index, edge_attr', [
                                     (gnn.GATv2Conv(input_dim, latent_dim, edge_dim=1), 'x, edge_index, edge_attr -> x'),
                                     nn.ReLU(inplace=True),
                                     nn.Linear(latent_dim, input_dim),
-                                ])
+                                    nn.Softmax(dim=-1)
+                                ]) # Causal graph inference
 
-    def compute_adj__comp_optim(self, latent, aux, mode = "a"): # /!\ big memory needed!
+
+    def _compute_mask(self, one_hot_latent, aux, mode = "a"): # TODO: assess if mask needed for y mode since already know if variable affected by intervention
+        if mode == "a":
+            aux = aux.unsqueeze(1).repeat(1,one_hot_latent.size(1), 1)
+
+        inter_mask = self.masks[mode](F.pad(aux,(1,0),"constant",0).to(dtype=torch.float32))
+        no_inter_mask = self.masks[mode](F.one_hot(torch.zeros((aux.size(0), aux.size(1)),dtype=torch.int64), num_classes=aux.size(-1)+1).to(one_hot_latent.device, dtype=torch.float32))
+
+        inter_masked_latent = (one_hot_latent * inter_mask ).sum(dim=-1) # [B x HW]
+        no_inter_masked_latent = (one_hot_latent * no_inter_mask).sum(dim=-1) # [B x HW]
+        logits = torch.log(torch.stack([no_inter_masked_latent, inter_masked_latent],dim=-1).clamp(min=1e-4)) # [B x HW x 2], clamp to avoid -inf values
+
+        mask = F.gumbel_softmax(logits,tau=1,hard=True)[...,1].unsqueeze(-1) # [B x HW x 1]
+        return mask
+
+    def _split_by_inter(self, aux):
+        inter_ids = torch.argmax(aux, dim=-1) # [B x HW x A] --> [B x HW] if action mode else [B x HW x D] --> [B x HW]
+        inter_dict = {id:torch.where(inter_ids==id) for id in set(inter_ids.view((-1)).tolist())}
+        return inter_dict
+
+    def _merge_inter(self, inter_dict, inter_coeffs_dict, shape, device):
+        res = torch.zeros(shape).to(device)
+        for i in inter_dict.keys():
+            res[inter_dict[i]] = inter_coeffs_dict[i]
+        return res        
+
+    def _compute_adj__comp_optim(self, latent, aux, mask, mode = "a"): # /!\ big memory needed!
         repeats = latent.size(1)
         nodes_i = latent.repeat(1,1,repeats).view((latent.size(0),-1,latent.size(2))) # [B x HW x D] --> [B x HWHW x D]
         nodes_j = latent.repeat(1,repeats,1) # [B x HW x D] --> [B x HWHW x D]
         
+        inp = torch.concat([nodes_i,nodes_j],-1) # [B x HWHW x 2D]
+
+        no_inter_coeffs = self.graph_discovers[mode][0](inp).view((-1,repeats,repeats)) # [B x HW x HW]
+
         if mode == "a":
-            aux = aux.unsqueeze(1).repeat(1,nodes_i.size(1),1).view(nodes_i.shape) # [B x D] --> [B x HW x D]
-        else:
-            aux = aux.repeat(1,1,repeats).view((latent.size(0),-1,latent.size(2))) # [B x HW x D] --> [B x HWHW x D]
+            aux = aux.unsqueeze(1).repeat(1,inp.size(1), 1)
             
-        inp = torch.concat([nodes_i,nodes_j, aux],-1)
-        coeffs = self.graph_discovers[mode](inp).view((-1,repeats,repeats)) # [B x HW x HW]
-        return coeffs
+        inter_dict = self._split_by_inter(aux)
+        inter_coeffs_dict = {i: self.graph_discovers[mode][1+i](inp[indices]) for i, indices in inter_dict.items()}
+        inter_coeffs = self._merge_inter(inter_dict, inter_coeffs_dict, (inp.size(0), inp.size(1), 1), inp.device).view((-1,repeats,repeats))
+
+        return no_inter_coeffs * (1 - mask) + inter_coeffs * mask
     
-    def compute_adj__mem_optim(self, latent, aux, mode = "a"): # /!\ very big computation graph!
+    def _compute_adj__mem_optim(self, latent, aux, mask, mode = "a"): # /!\ very big computation graph!
         repeats = latent.size(1)
         
         if mode == "a":
-            aux = aux.unsqueeze(1).repeat(1,repeats,1) # [B x D] --> [B x HW x D]
+            aux = aux.unsqueeze(1).repeat(1,repeats,1) # [B x A] --> [B x HW x A]
 
-        coeffs = torch.zeros((latent.size(0), repeats, repeats)).to(device=latent.device)  # [B x HW x HW]
+        no_inter_coeffs = torch.zeros((latent.size(0), repeats, repeats)).to(latent.device)  # [B x HW x HW]
+        inter_coeffs = torch.zeros((latent.size(0), repeats, repeats)).to(latent.device)  # [B x HW x HW]
 
         for i in range(repeats):
             nodes_i = latent[:,i,:].unsqueeze(1).repeat(1,repeats,1)
-            aux_i = aux[:,i,:].unsqueeze(1).repeat(1,repeats,1)
             nodes_j = latent
-            inp = torch.concat([nodes_i, nodes_j, aux_i],-1)
-            coeffs[:,i] = self.graph_discovers[mode](inp).view((latent.size(0), repeats))
+            inp = torch.concat([nodes_i, nodes_j],-1)
             
-        return coeffs
+            no_inter_coeffs[:,i] = self.graph_discovers[mode][0](inp).view((latent.size(0), repeats))
 
-    def compute_adj(self, latent, aux, mode = "a"):
-        return self.comp_adj_optim(latent, aux, mode)
+            inter_dict = self._split_by_inter(aux)
+            inter_coeffs_dict = {i: self.graph_discovers[mode][1+i](inp[indices]) for i, indices in inter_dict.items()}
+            inter_coeffs[:,i] = self._merge_inter(inter_dict, inter_coeffs_dict, (inp.size(0), inp.size(1), 1), inp.device).view((latent.size(0), repeats))
+            
+        return no_inter_coeffs * (1 - mask) + inter_coeffs * mask
+
+    def _compute_adj(self, latent, aux, mask, mode = "a"):
+        return self.comp_adj_optim(latent, aux, mask, mode)
 
 
-    def sample_bernoulli(self, adjacency, differentiable=True):
+    def _sample_bernoulli(self, adjacency, differentiable=True):
         if differentiable: # reparametrization trick using Straight-through Gumbel-Softmax
             logits = torch.log(torch.stack([1-adjacency,adjacency],dim=-1).clamp(min=1e-4)) # clamp to avoid -inf values
             return F.gumbel_softmax(logits,tau=1,hard=True)[...,1]
@@ -153,7 +212,7 @@ class CausalTransition(nn.Module):
             return torch.bernoulli(adjacency)
     
 
-    def compute_y(self, latent, action, adjacency):
+    def _compute_y(self, latent, action, adjacency):
         # preprocess
         if self.noise == "exo":
             latent = latent + torch.normal(0,1,latent.shape).to(latent.device) # noise integrated to variables
@@ -182,20 +241,21 @@ class CausalTransition(nn.Module):
         return nodes_y.view((action_latent_shape))[:,:-var_supp_size,:] # [B x HW x D] (remove action and noise nodes) 
 
 
-    def infer_action(self, adjacency_coeffs, latent, differentiable=True):
+    def _infer_action(self, adjacency_coeffs, latent, differentiable=True):
         a = F.one_hot(torch.arange(self.action_dim).repeat(latent.size(0))).view((latent.size(0),self.action_dim,self.action_dim)).to(latent.device, dtype=latent.dtype) # [B x A x A]
-        a = self.a_dense(a) # [B x A x D]
-        a = a.permute(1,0,2) # [A x B x D]
+        a = a.permute(1,0,2) # [A x B x A]
+        pos_latent = self.pos_encoding(latent)  # add positional embeddings
 
         distances = torch.zeros((a.size(1),self.action_dim)).to(a.device) # [B x A]
         for i in range(self.action_dim):
-            adj_i = self.compute_adj(latent, a[i], "a")
+            mask = self._compute_mask(latent, a[i], mode="a")
+            adj_i = self._compute_adj(pos_latent, a[i], mask, "a")
             adj_i = adj_i.detach().clone() # prevents backpropagation
             distances[:,i] = F.pairwise_distance(adjacency_coeffs.view((a.size(1), -1)), adj_i.view((a.size(1), -1)))
         probas = 1-torch.softmax(distances,dim=-1)
         
         if differentiable: # reparametrization trick using Straight-through Gumbel-Softmax, adds stochasticity to the process
-            logits = torch.log(probas)
+            logits = torch.log(probas.clamp(min=1e-4))
             actions = F.gumbel_softmax(logits,tau=1,hard=True)
         else:
             actions = F.one_hot(torch.argmax(probas,dim=1))
@@ -208,25 +268,27 @@ class CausalTransition(nn.Module):
         latent_shape = latent.shape # [B x D x H x W]
         latent = latent.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]
 
+        mask = torch.zeros(latent.size(0), latent.size(1), 1).to(latent.device)
         pos_latent = self.pos_encoding(latent)  # add positional embeddings
-        action = self.a_dense(torch.zeros(latent.size(0), self.action_dim).to(latent.device)) # [B x A]  --> [B x D]
+        action = torch.zeros(latent.size(0), self.action_dim).to(latent.device) # [B x A]
 
         # Compute causal graph
-        adjacency_coeffs = self.compute_adj(pos_latent, action, "a")
-        causal_graph = self.sample_bernoulli(adjacency_coeffs)
+        adjacency_coeffs = self._compute_adj(pos_latent, action, mask, "a")
+        causal_graph = self._sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
-        latent_y = self.compute_y(pos_latent, action, causal_graph) # [B x HW x D]
+        action = self.a_dense(action) # [B x A]  --> [B x D]
+        latent_y = self._compute_y(pos_latent, action, causal_graph) # [B x HW x D]
 
         # Compute loss function
-        id_matrix = F.one_hot(torch.arange(causal_graph.size(-1)).repeat(causal_graph.size(0),1)).to(latent.device, dtype=latent.dtype)
-        ct_loss = self.alpha * (
-                    F.mse_loss(latent, self.compute_y(pos_latent, action, id_matrix))
+        id_matrix = F.one_hot(torch.arange(causal_graph.size(-1)).repeat(causal_graph.size(0),1)).to(latent.device, dtype=causal_graph.dtype)
+        ct_reg = self.alpha * (
+                    F.mse_loss(latent, self._compute_y(pos_latent, action, id_matrix))
                     + F.mse_loss(id_matrix, causal_graph)
-                ) + self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, latent_y, "y") + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
+                ) + self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, latent_y, "y") + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
         latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x D x H x W]
-        return [latent_y, ct_loss]
+        return [latent_y, ct_reg]
 
 
     # @detach_and_paste
@@ -234,21 +296,22 @@ class CausalTransition(nn.Module):
         latent_shape = latent.shape # [B x D x H x W]
         latent = latent.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]
 
+        mask = self._compute_mask(latent, action, mode="a")
         pos_latent = self.pos_encoding(latent)  # add positional embeddings
-        action = self.a_dense(action) # [B x A] --> [B x D]
 
         # Compute causal graph
-        adjacency_coeffs = self.compute_adj(pos_latent, action, "a")
-        causal_graph = self.sample_bernoulli(adjacency_coeffs)
+        adjacency_coeffs = self._compute_adj(pos_latent, action, mask, "a")
+        causal_graph = self._sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
-        latent_y = self.compute_y(pos_latent, action, causal_graph) # [B x HW x D]
+        action = self.a_dense(action) # [B x A] --> [B x D]
+        latent_y = self._compute_y(pos_latent, action, causal_graph) # [B x HW x D]
 
         # Compute loss function
-        ct_loss = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, latent_y, "y") + self.beta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
+        ct_reg = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, latent_y, "y") + self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
         latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x H x W x D]
-        return [latent_y, ct_loss]
+        return [latent_y, ct_reg]
 
     
     # no @detach_and_paste since causal model also acts as decoder for this setting
@@ -257,37 +320,53 @@ class CausalTransition(nn.Module):
         latent = latent.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]
         latent_y = latent_y.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]
         
+        mask = self._compute_mask(latent, latent_y, mode="y")
         pos_latent = self.pos_encoding(latent)  # add positional embeddings
         
         # Compute causal graph
-        adjacency_coeffs = self.compute_adj(pos_latent, latent_y, "y")
+        adjacency_coeffs = self._compute_adj(pos_latent, latent_y, mask, "y")
 
         # Infer a
-        action = self.infer_action(adjacency_coeffs, latent)
+        action = self._infer_action(adjacency_coeffs, latent)
 
         # Compute loss function
-        causal_graph = self.sample_bernoulli(adjacency_coeffs)
-        ct_loss = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, pos_latent, self.a_dense(action), "a") + self.beta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
+        causal_graph = self._sample_bernoulli(adjacency_coeffs)
+        ct_reg = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, action, "a") + self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
 
-        return [action, ct_loss]
-    
-    
+        return [action, ct_reg]
 
-    def dependencies_MSE_loss(self, adjacency_coeffs, latent, action, mode = "a"):
+
+    
+    def latent_loss(self, latent, latent_y):
+        latent_y = latent_y.detach()
+        return self. latent_MSE_loss(latent, latent_y) + self.beta * self.latent_KL_loss(latent, latent_y) 
+    
+    def latent_MSE_loss(self, latent, latent_y):
+        return F.mse_loss(latent, latent_y)
+    
+    def latent_KL_loss(self, latent, latent_y):
+        return F.kl_div(latent.clamp(min=1e-4).log(), latent_y, reduction="batchmean")
+
+
+    def dependencies_MSE_loss(self, adjacency_coeffs, one_hot_latent, action, mode = "a"):
         adjacency_coeffs = adjacency_coeffs.detach()
-        latent = latent.detach()
+        one_hot_latent = one_hot_latent.detach()
         action = action.detach()
+        mask = self._compute_mask(one_hot_latent, action, mode)
+        pos_latent = self.pos_encoding(one_hot_latent)
 
-        twin_coeffs = self.compute_adj(latent, action, mode)
+        twin_coeffs = self._compute_adj(pos_latent, action, mask, mode)
         return F.mse_loss(twin_coeffs, adjacency_coeffs)
     
-    def dependencies_KL_loss(self, causal_graph, latent, action, mode = "a"):
+    def dependencies_KL_loss(self, causal_graph, one_hot_latent, action, mode = "a"):
         causal_graph = causal_graph.detach()
-        latent = latent.detach()
+        one_hot_latent = one_hot_latent.detach()
         action = action.detach()
+        mask = self._compute_mask(one_hot_latent, action, mode)
+        pos_latent = self.pos_encoding(one_hot_latent)
 
-        twin_cg = self.sample_bernoulli(self.compute_adj(latent, action, mode))
-        return F.kl_div(twin_cg, causal_graph)
+        twin_cg = self._sample_bernoulli(self._compute_adj(pos_latent, action, mask, mode))
+        return F.kl_div(twin_cg.log(), causal_graph, reduction="batchmean")
 
 
     def graph_size_loss(self, causal_graph):
@@ -309,6 +388,7 @@ class CTMCQVAE(BaseVAE):
                  hidden_dims: List = None,
                  causal_hidden_dim: int = 800,
                  beta: float = 0.25,
+                 gamma: float = 0.25,
                  img_size: int = 64,
                  codebooks:int = 1,
                  **kwargs) -> None:
@@ -319,6 +399,7 @@ class CTMCQVAE(BaseVAE):
         self.img_size = img_size
         self.in_channels = in_channels
         self.beta = beta
+        self.gamma = gamma
         self.codebooks = codebooks
 
         modules = []
@@ -361,9 +442,7 @@ class CTMCQVAE(BaseVAE):
                                         codebooks,
                                         self.beta)
 
-        # self.ct_normalizer = nn.BatchNorm2d(embedding_dim//codebooks)
-        self.ct_normalizer = nn.LayerNorm((embedding_dim//codebooks, codebooks*self.nb_latents, self.nb_latents)) # [B x (D/K) x (K*H) x W]
-        self.ct_layer = CausalTransition(embedding_dim//codebooks,
+        self.ct_layer = CausalTransition(num_embeddings, #embedding_dim//codebooks,
                                         action_dim,
                                         causal_hidden_dim,
                                         **kwargs)
@@ -430,16 +509,30 @@ class CTMCQVAE(BaseVAE):
         return result
 
 
-    def ct_normalize(self, x: Tensor) -> Tensor:
+    def ct_preprocess(self, x: Tensor, latents_shape: list) -> Tensor:
         """
-        Normalizes and format the tensor for causal transition: 
+        Formats the tensor for causal transition after computing of inds in quantization: 
+        encode input inds with one-hot
         break dimensions into K codebooks and concat blocks in sequence
-        :param z: (Tensor) [B x D x H x W]
-        :return: (Tensor) [B x (D/K) x (K*H) x W] 
+        :param x: (Tensor) [B x K x H x W] 
+        :return: (Tensor) [B x N x (K*H) x W]
         """
-        x_shape = x.shape
-        x = x.view((x_shape[0],x_shape[1]//self.codebooks,self.codebooks*x_shape[2],x_shape[3]))
-        x = self.ct_normalizer(x)
+        x = F.one_hot(x,num_classes=self.num_embeddings).to(dtype=torch.float32) # [B x K x H x W x N]
+        x = x.view((latents_shape[0], self.codebooks*latents_shape[2], latents_shape[3], self.num_embeddings)) # [B x (K*H) x W x N]
+        x = x.permute(0,3,1,2) # [B x N x (K*H) x W]
+        return x
+    
+    def ct_postprocess(self, x: Tensor, latents_shape: list):
+        """
+        Formats the tensor for computation of latents in quantization after causal transition: 
+        retrieve one-hot classes with argmax
+        rebuild the K codebooks
+        :param x: (Tensor) [B x N x (K*H) x W]
+        :return: (Tensor) [B x K x H x W]
+        """
+        x = x.permute(0,2,3,1) # [B x (K*H) x W x N]
+        x = x.reshape((latents_shape[0], self.codebooks, latents_shape[2], latents_shape[3], self.num_embeddings)) # [B x K x H x W x N]
+        x = torch.argmax(x,dim=-1) # [B x K x H x W]
         return x
 
 
@@ -449,48 +542,61 @@ class CTMCQVAE(BaseVAE):
         # Encoding
         latents = self.encode(input)[0]
 
-        # Causal Transition
-        latents_shape = latents.shape
-        latents = self.ct_normalize(latents) # [B x D x H x W] --> [B x (D/K) x (K*H) x W]
-        latents, ct_loss = self.ct_layer(latents) # we may need to apply it either before or after full quantization
-        latents = latents.reshape(latents_shape) # [B x (D/K) x (K*H) x W] --> [B x D x H x W]
+        # Quantization indicator searh
+        encoding_inds = self.vq_layer.compute_inds(latents) # [B x K x H x W]
 
-        # Quantization
-        quantized_inputs, vq_loss = self.vq_layer(latents)
+        # Causal Transition
+        latents_shape = latents.shape # [B x D x H x W] 
+        encodings_one_hot = self.ct_preprocess(encoding_inds, latents_shape) # [B x N x (K*H) x W]
+        ct_encodings, ct_reg = self.ct_layer(encodings_one_hot) # we may need to apply it either before or after full quantization
+        ct_loss = ct_reg + self.ct_layer.latent_loss(ct_encodings, encodings_one_hot)
+        ct_encodings = self.ct_postprocess(ct_encodings, latents_shape)
+
+        # Quantization latent retrieval
+        quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, ct_encodings)
 
         # Decoding
-        return [self.decode(quantized_inputs), input, vq_loss, ct_loss]
+        return [self.decode(quantized_latents), input, vq_loss, ct_loss]
 
         
     def forward_action(self, input: Tensor, action: Tensor, input_y: Tensor = None, **kwargs) -> List[Tensor]:
         # Encoding
         latents = self.encode(input)[0]
+
+        # Quantization indicator searh
+        encoding_inds = self.vq_layer.compute_inds(latents) # [B x K x H x W]
         
         # Causal Transition
         latents_shape = latents.shape
-        latents = self.ct_normalize(latents) # [B x D x H x W] --> [B x (D/K) x (K*H) x W]
-        latents, ct_loss = self.ct_layer.forward_action(latents, action)
-        latents = latents.reshape(latents_shape) # [B x (D/K) x (K*H) x W]--> [B x D x H x W]
-        
-        # Quantization
-        quantized_inputs, vq_loss = self.vq_layer(latents)
+        encodings_one_hot = self.ct_preprocess(encoding_inds, latents_shape) # [B x N x (K*H) x W]
+        ct_encodings, ct_reg = self.ct_layer.forward_action(encodings_one_hot, action)
+        ct_loss = ct_reg + self.ct_layer.latent_loss(ct_encodings, self.ct_preprocess(self.vq_layer.compute_inds(self.encode(input_y)[0]), latents_shape))
+        ct_encodings = self.ct_postprocess(ct_encodings, latents_shape)
+
+        # Quantization latent retrieval
+        quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, ct_encodings)
         
         # Decoding
-        return [self.decode(quantized_inputs), input_y, vq_loss, ct_loss]
+        return [self.decode(quantized_latents), input_y, vq_loss, ct_loss]
 
         
     def forward_causal(self, input: Tensor, input_y: Tensor, action: Tensor = None, **kwargs) -> List[Tensor]:
         # Encoding
         latents_x = self.encode(input)[0]
         latents_y = self.encode(input_y)[0]
+
+        # Quantization indicator searh
+        encoding_x = self.vq_layer.compute_inds(latents_x) # [B x K x H x W]
+        encoding_y = self.vq_layer.compute_inds(latents_y) # [B x K x H x W]  /!\ no backpropagation to encoders
         
         # Causal Transition
-        latents_x = self.ct_normalize(latents_x) # [B x D x H x W] --> [B x (D/K) x (K*H) x W]
-        latents_y = self.ct_normalize(latents_y) # [B x D x H x W] --> [B x (D/K) x (K*H) x W]
-        recons_action, ct_loss = self.ct_layer.forward_transition(latents_x, latents_y) # we may need to apply it either before or after full quantization
+        latents_shape = latents_x.shape
+        encodings_one_hot_x = self.ct_preprocess(encoding_x, latents_shape) # [B x N x (K*H) x W]
+        encodings_one_hot_y = self.ct_preprocess(encoding_y, latents_shape) # [B x N x (K*H) x W]
+        recons_action, ct_reg = self.ct_layer.forward_transition(encodings_one_hot_x, encodings_one_hot_y)
         
         # Decoding
-        return [recons_action, action, torch.tensor(0.0), ct_loss]
+        return [recons_action, action, torch.tensor(0.0), ct_reg]
 
 
     FORWARD_MODES = {
@@ -530,9 +636,24 @@ class CTMCQVAE(BaseVAE):
         vq_loss = args[2]
         ct_loss = args[3]
 
-        recons_loss = F.mse_loss(recons, input)
+        
+        # if torch.isnan(recons).any():
+        #     print("NaN after decoding!")
+        # if torch.isnan(input).any():
+        #     print("NaN input!")
 
-        loss = recons_loss + vq_loss + ct_loss
+        recons_loss = F.mse_loss(recons, input)
+        # if torch.isnan(recons_loss).any():
+        #     print("NaN loss after decoding!")
+
+
+        # for k, v in dict(self.named_parameters()).items():
+        #     if torch.isnan(v).any():
+        #         print(k, " is nan")
+        #         exit()
+
+
+        loss = recons_loss + vq_loss + self.gamma * ct_loss
         return {'loss': loss,
                 'Reconstruction_Loss': recons_loss,
                 'VQ_Loss': vq_loss,
