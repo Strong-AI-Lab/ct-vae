@@ -36,14 +36,14 @@ exp_params:
 
 trainer_params:
   gpus: [0] # must be set according to the number of gpus per trial (e.g. if 1 gpu per trial, set [0], if 2 gpus, set [0,1])
-  max_epochs: 10
+  max_epochs: 100
 
 logging_params:
   save_dir: "logs/"
   name: 'CTMCQVAE'
 
 hyperparameter_search:
-  num_samples: 4
+  num_samples: 1000
   resources_per_trial: # unlike in the 'run' script, the ray library cannot restrict gpu use, need to set environment variable: CUDA_VISIBLE_DEVICES
     cpu: 1
     gpu: 1
