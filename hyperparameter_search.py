@@ -8,13 +8,11 @@ from metrics import MetricSet
 from experiment import VAEXperiment
 from dataset import VAEDataset
 
-import torch.backends.cudnn as cudnn
 from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.plugins import DDPPlugin
 from ray import tune
 from ray.tune.integration.pytorch_lightning import TuneReportCallback
-from ray.tune.logger import DEFAULT_LOGGERS
 from ray.air.integrations.wandb import WandbLoggerCallback
 
 
@@ -77,7 +75,7 @@ def hyp_search(config):
 
     runner = Trainer(logger=[wb_logger],
                     callbacks=[
-                        TuneReportCallback({"loss": "val_loss"}, on="validation_end"),
+                        TuneReportCallback({"loss": "val_Reconstruction_Loss"}, on="validation_end"),
                     ],
                     strategy=DDPPlugin(find_unused_parameters=config['exp_params']['find_unused_parameters']),
                     **config['trainer_params'])
