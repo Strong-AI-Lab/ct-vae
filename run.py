@@ -79,7 +79,8 @@ experiment = VAEXperiment(model,
                           train_metric,
                           val_metric,
                           config['exp_params'],
-                          val_sampling=True)
+                          val_sampling=True,
+                          wandb_logger=True)
 
 
 runner = Trainer(logger=[tb_logger, wb_logger],

@@ -11,6 +11,7 @@ from torchvision import transforms
 import torchvision.utils as vutils
 from torchvision.datasets import CelebA
 from torch.utils.data import DataLoader
+import wandb
 
 
 class VAEXperiment(pl.LightningModule):
@@ -20,7 +21,8 @@ class VAEXperiment(pl.LightningModule):
                  train_metric: Metric,
                  val_metric: Metric,
                  params: dict,
-                 val_sampling: bool = True) -> None:
+                 val_sampling: bool = True,
+                 wandb_logger = True) -> None:
         super(VAEXperiment, self).__init__()
 
         self.model = vae_model
@@ -30,6 +32,7 @@ class VAEXperiment(pl.LightningModule):
         self.params = params
         self.curr_device = None
         self.hold_graph = False
+        self.wandb_logger = wandb_logger
         try:
             self.hold_graph = self.params['retain_first_backpass']
         except:
@@ -49,9 +52,9 @@ class VAEXperiment(pl.LightningModule):
                                               M_N = self.params['kld_weight'], #al_img.shape[0]/ self.num_train_imgs,
                                               optimizer_idx=optimizer_idx,
                                               batch_idx = batch_idx)
-        train_metric = {} if self.train_metric is None else {key: torch.tensor(val, dtype=torch.float32) for key, val in self.train_metric.compute(self.metric_func).items()}
+        train_metric = {} if self.train_metric is None else self.train_metric.compute(self.metric_func)
         
-        self.log_dict({**{key: val.item() for key, val in train_loss.items()}, **train_metric}, sync_dist=True, batch_size=real_img.size(0))
+        self.log_all({**train_loss, **train_metric}, batch_size=real_img.size(0), validation=False)
 
         return train_loss['loss']
 
@@ -66,9 +69,9 @@ class VAEXperiment(pl.LightningModule):
                                             M_N = 1.0, #real_img.shape[0]/ self.num_val_imgs,
                                             optimizer_idx = optimizer_idx,
                                             batch_idx = batch_idx)
-        test_metric = {} if self.val_metric is None else {key: torch.tensor(val, dtype=torch.float32) for key, val in self.val_metric.compute(self.metric_func).items()}
-        
-        self.log_dict({**{f"val_{key}": val.item() for key, val in val_loss.items()}, **test_metric}, sync_dist=True, batch_size=real_img.size(0))
+        test_metric = {} if self.val_metric is None else self.val_metric.compute(self.metric_func)
+
+        self.log_all({**val_loss, **test_metric}, batch_size=real_img.size(0), validation=True)
 
         
     def on_validation_end(self) -> None:
@@ -80,6 +83,35 @@ class VAEXperiment(pl.LightningModule):
         x = self.model.encode(x)[0]
         x = x.view(x.size(0),-1)
         return x
+    def log_all(self, losses: dict, batch_size, validation: bool = False):
+        # Create validation keys
+        if validation:
+            losses = {f"val_{key}": val for key, val in losses.items()}
+        
+        # Remove unusual data types and log separately if possible
+        to_remove = []
+        for key, val in losses.items():
+            if type(val) == torch.Tensor and (len(val.shape) == 0 or (len(val.shape) == 1 and val.size(0) == 1)):
+                losses[key] = val.item()
+            else:
+                if self.wandb_logger:
+                    # logger = self.logger
+                    logger = self.loggers[1]
+                    if type(val) == torch.Tensor and (len(val.shape) == 2 or (len(val.shape) == 3 and val.size(0) in [1,3,4])):
+                        logger.log_image(key=key, images=[wandb.Image(val)])
+                        to_remove.append(key)
+                    elif type(val) ==  wandb.Image:
+                        logger.log_image(key=key, images=[val])
+
+                to_remove.append(key)
+        for key in to_remove:
+            del losses[key]
+            
+        # Log remaining
+        self.log_dict(losses, sync_dist=True, batch_size=batch_size)
+
+
+        
     def sample_images(self):
         # Get sample reconstruction image            
         test_input, test_label, *args = next(iter(self.trainer.datamodule.test_dataloader()))
@@ -89,18 +121,18 @@ class VAEXperiment(pl.LightningModule):
         kwargs = {} if len(args) < 1 or type(args[0]) != dict else args[0]
 
         vutils.save_image( test_input.data,
-                          os.path.join(self.logger.log_dir , 
+                          os.path.join(self.loggers[0].log_dir , 
                                        "Inputs", 
-                                       f"inputs_{self.logger.name}_Epoch_{self.current_epoch}.png"),
+                                       f"inputs_{self.loggers[0].name}_Epoch_{self.current_epoch}.png"),
                           normalize=True,
                           nrow=12)
 
 #         test_input, test_label = batch
         recons = self.model.generate(test_input, labels = test_label, **kwargs)
         vutils.save_image( recons.data,
-                          os.path.join(self.logger.log_dir , 
+                          os.path.join(self.loggers[0].log_dir , 
                                        "Reconstructions", 
-                                       f"recons_{self.logger.name}_Epoch_{self.current_epoch}.png"),
+                                       f"recons_{self.loggers[0].name}_Epoch_{self.current_epoch}.png"),
                           normalize=True,
                           nrow=12)
 
@@ -110,9 +142,9 @@ class VAEXperiment(pl.LightningModule):
                                         labels = test_label,
                                         **kwargs)
             vutils.save_image( samples.cpu().data,
-                              os.path.join(self.logger.log_dir , 
+                              os.path.join(self.loggers[0].log_dir , 
                                            "Samples",      
-                                           f"sample_{self.logger.name}_Epoch_{self.current_epoch}.png"),
+                                           f"sample_{self.loggers[0].name}_Epoch_{self.current_epoch}.png"),
                               normalize=True,
                               nrow=12)
         except Warning:

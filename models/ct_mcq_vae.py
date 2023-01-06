@@ -288,7 +288,7 @@ class CausalTransition(nn.Module):
                 ) + self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, latent_y, "y") + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
         latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x D x H x W]
-        return [latent_y, ct_reg]
+        return [latent_y, ct_reg, {"ct_adjacency": adjacency_coeffs.mean(0)}]
 
 
     # @detach_and_paste
@@ -310,8 +310,8 @@ class CausalTransition(nn.Module):
         # Compute loss function
         ct_reg = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, latent_y, "y") + self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
-        latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x H x W x D]
-        return [latent_y, ct_reg]
+        latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x D x H x W]
+        return [latent_y, ct_reg, {"ct_mask": mask.view(latent_shape[:1]+latent_shape[2:]).mean(0), "ct_adjacency": adjacency_coeffs.mean(0)}]
 
     
     # no @detach_and_paste since causal model also acts as decoder for this setting
@@ -333,7 +333,7 @@ class CausalTransition(nn.Module):
         causal_graph = self._sample_bernoulli(adjacency_coeffs)
         ct_reg = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, action, "a") + self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
 
-        return [action, ct_reg]
+        return [action, ct_reg, {"ct_mask": mask.view(latent_shape[:1]+latent_shape[2:]).mean(0), "ct_adjacency": adjacency_coeffs.mean(0)}]
 
 
     
@@ -548,7 +548,7 @@ class CTMCQVAE(BaseVAE):
         # Causal Transition
         latents_shape = latents.shape # [B x D x H x W] 
         encodings_one_hot = self.ct_preprocess(encoding_inds, latents_shape) # [B x N x (K*H) x W]
-        ct_encodings, ct_reg = self.ct_layer(encodings_one_hot) # we may need to apply it either before or after full quantization
+        ct_encodings, ct_reg, *ct_metrics = self.ct_layer(encodings_one_hot) # we may need to apply it either before or after full quantization
         ct_loss = ct_reg + self.ct_layer.latent_loss(ct_encodings, encodings_one_hot)
         ct_encodings = self.ct_postprocess(ct_encodings, latents_shape)
 
@@ -556,7 +556,7 @@ class CTMCQVAE(BaseVAE):
         quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, ct_encodings)
 
         # Decoding
-        return [self.decode(quantized_latents), input, vq_loss, ct_loss]
+        return [self.decode(quantized_latents), input, vq_loss, ct_loss, {**{"mode" : "base"}, **ct_metrics[0]}]
 
         
     def forward_action(self, input: Tensor, action: Tensor, input_y: Tensor = None, **kwargs) -> List[Tensor]:
@@ -569,7 +569,7 @@ class CTMCQVAE(BaseVAE):
         # Causal Transition
         latents_shape = latents.shape
         encodings_one_hot = self.ct_preprocess(encoding_inds, latents_shape) # [B x N x (K*H) x W]
-        ct_encodings, ct_reg = self.ct_layer.forward_action(encodings_one_hot, action)
+        ct_encodings, ct_reg, *ct_metrics = self.ct_layer.forward_action(encodings_one_hot, action)
         ct_loss = ct_reg + self.ct_layer.latent_loss(ct_encodings, self.ct_preprocess(self.vq_layer.compute_inds(self.encode(input_y)[0]), latents_shape))
         ct_encodings = self.ct_postprocess(ct_encodings, latents_shape)
 
@@ -577,9 +577,9 @@ class CTMCQVAE(BaseVAE):
         quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, ct_encodings)
         
         # Decoding
-        return [self.decode(quantized_latents), input_y, vq_loss, ct_loss]
+        return [self.decode(quantized_latents), input_y, vq_loss, ct_loss, {**{"mode" : "action"}, **ct_metrics[0]}]
 
-        
+
     def forward_causal(self, input: Tensor, input_y: Tensor, action: Tensor = None, **kwargs) -> List[Tensor]:
         # Encoding
         latents_x = self.encode(input)[0]
@@ -593,10 +593,11 @@ class CTMCQVAE(BaseVAE):
         latents_shape = latents_x.shape
         encodings_one_hot_x = self.ct_preprocess(encoding_x, latents_shape) # [B x N x (K*H) x W]
         encodings_one_hot_y = self.ct_preprocess(encoding_y, latents_shape) # [B x N x (K*H) x W]
-        recons_action, ct_reg = self.ct_layer.forward_transition(encodings_one_hot_x, encodings_one_hot_y)
+        recons_action, ct_reg, *ct_metrics = self.ct_layer.forward_transition(encodings_one_hot_x, encodings_one_hot_y)
+        ct_acc = (torch.argmax(recons_action, dim=-1)==torch.argmax(action, dim=-1)).float().mean()
         
         # Decoding
-        return [recons_action, action, torch.tensor(0.0), ct_reg]
+        return [recons_action, action, torch.tensor(0.0), ct_reg, {**{"causal_acc": ct_acc, "mode": "causal"}, **ct_metrics[0]}]
 
 
     FORWARD_MODES = {
@@ -635,29 +636,18 @@ class CTMCQVAE(BaseVAE):
         input = args[1]
         vq_loss = args[2]
         ct_loss = args[3]
-
-        
-        # if torch.isnan(recons).any():
-        #     print("NaN after decoding!")
-        # if torch.isnan(input).any():
-        #     print("NaN input!")
+        metrics = {} if len(args) < 5 else args[4]
 
         recons_loss = F.mse_loss(recons, input)
-        # if torch.isnan(recons_loss).any():
-        #     print("NaN loss after decoding!")
-
-
-        # for k, v in dict(self.named_parameters()).items():
-        #     if torch.isnan(v).any():
-        #         print(k, " is nan")
-        #         exit()
-
 
         loss = recons_loss + vq_loss + self.gamma * ct_loss
-        return {'loss': loss,
-                'Reconstruction_Loss': recons_loss,
-                'VQ_Loss': vq_loss,
-                'CT_Loss': ct_loss}
+        return {
+                **{'loss': loss,
+                    'Reconstruction_Loss': recons_loss,
+                    'VQ_Loss': vq_loss,
+                    'CT_Loss': ct_loss},
+                **metrics
+                }
 
     def sample(self,
                num_samples:int,

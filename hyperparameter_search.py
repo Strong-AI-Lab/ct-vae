@@ -71,7 +71,8 @@ def hyp_search(config):
                             None,
                             None,
                             config['exp_params'],
-                            val_sampling=False)
+                            val_sampling=False,
+                            wandb_logger=False)
 
     runner = Trainer(logger=[wb_logger],
                     callbacks=[
