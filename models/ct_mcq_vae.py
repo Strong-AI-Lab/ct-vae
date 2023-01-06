@@ -260,13 +260,7 @@ class CausalTransition(nn.Module):
             distances[:,i] = F.pairwise_distance(adjacency_coeffs.view((a.size(1), -1)), adj_i.view((a.size(1), -1)))
         probas = 1-torch.softmax(distances,dim=-1)
         
-        if differentiable: # reparametrization trick using Straight-through Gumbel-Softmax, adds stochasticity to the process
-            logits = torch.log(probas.clamp(min=1e-4))
-            actions = F.gumbel_softmax(logits,tau=1,hard=True)
-        else:
-            actions = F.one_hot(torch.argmax(probas,dim=1))
-
-        return actions # [B x A]
+        return probas # [B x A]
 
 
     # @detach_and_paste
@@ -289,8 +283,8 @@ class CausalTransition(nn.Module):
         # Compute loss function
         id_matrix = F.one_hot(torch.arange(causal_graph.size(-1)).repeat(causal_graph.size(0),1)).to(latent.device, dtype=causal_graph.dtype)
         ct_reg = self.alpha * (
-                    F.mse_loss(latent, self._compute_y(pos_latent, action, id_matrix))
-                    + F.mse_loss(id_matrix, causal_graph)
+                    F.cross_entropy(self._compute_y(pos_latent, action, id_matrix).reshape((-1, latent_shape[1])).clamp(min=1e-4).log(), latent.reshape((-1, latent_shape[1])).argmax(dim=-1))
+                    + F.mse_loss(causal_graph, id_matrix)
                 ) + self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, latent_y, "y") + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
         latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x D x H x W]
@@ -333,22 +327,30 @@ class CausalTransition(nn.Module):
         adjacency_coeffs = self._compute_adj(pos_latent, latent_y, mask, "y")
 
         # Infer a
-        action = self._infer_action(adjacency_coeffs, latent)
+        action_probas = self._infer_action(adjacency_coeffs, latent)
+        action = F.one_hot(torch.argmax(action_probas,dim=1))
 
         # Compute loss function
         causal_graph = self._sample_bernoulli(adjacency_coeffs)
         ct_reg = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, action, "a") + self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
 
-        return [action, ct_reg, {"ct_mask": mask.view(latent_shape[:1]+latent_shape[2:]).mean(0), "ct_adjacency": adjacency_coeffs.mean(0)}]
+        return [action_probas, ct_reg, {"ct_mask": mask.view(latent_shape[:1]+latent_shape[2:]).mean(0), "ct_adjacency": adjacency_coeffs.mean(0)}]
 
 
     
     def latent_loss(self, latent, latent_y):
         latent_y = latent_y.detach()
-        return self. latent_MSE_loss(latent, latent_y) + self.beta * self.latent_KL_loss(latent, latent_y) 
+        return self. latent_CrossEntropy_loss(latent, latent_y) + self.beta * self.latent_KL_loss(latent, latent_y) 
     
     def latent_MSE_loss(self, latent, latent_y):
         return F.mse_loss(latent, latent_y)
+    
+    def latent_CrossEntropy_loss(self, latent, latent_y):
+        latent = latent.permute(0, 2, 3, 1).reshape((-1, latent.size(1))) # [B x D x H x W] --> [BHW x D]
+        latent = latent.clamp(min=1e-4).log()
+        latent_y = latent_y.permute(0, 2, 3, 1).reshape((-1, latent_y.size(1))) # [B x D x H x W] --> [BHW x D]
+        latent_y = torch.argmax(latent_y, dim=-1)
+        return F.cross_entropy(latent, latent_y)
     
     def latent_KL_loss(self, latent, latent_y):
         return F.kl_div(latent.clamp(min=1e-4).log(), latent_y, reduction="batchmean")
@@ -646,7 +648,10 @@ class CTMCQVAE(BaseVAE):
         ct_loss = args[3]
         metrics = {} if len(args) < 5 else args[4]
 
-        recons_loss = F.mse_loss(recons, input)
+        if len(metrics) > 0 and "mode" in metrics and metrics["mode"] == "causal": # forward_causal is a classification task while the others are regressions
+            recons_loss = F.cross_entropy(recons.clamp(min=1e-4).log(), torch.argmax(input, dim=-1))
+        else:
+            recons_loss = F.mse_loss(recons, input)
 
         loss = recons_loss + vq_loss + self.gamma * ct_loss
         return {
