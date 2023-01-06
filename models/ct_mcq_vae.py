@@ -53,6 +53,7 @@ class CausalTransition(nn.Module):
                  input_dim: int,
                  action_dim: int,
                  latent_dim: int = 800,
+                 nb_heads: int = 1,
                  noise: str = "off",
                  c_alpha: float = 0.7,
                  c_beta: float = 0.4,
@@ -127,8 +128,13 @@ class CausalTransition(nn.Module):
                     ) # Causal intervention masking, selects adjacency matrix discoverer corresponding to output y
             })
 
+        self.nb_heads = nb_heads
         self.graph_transitioner = gnn.Sequential('x, edge_index, edge_attr', [
-                                    (gnn.GATv2Conv(input_dim, latent_dim, edge_dim=1), 'x, edge_index, edge_attr -> x'),
+                                    (gnn.GATv2Conv(input_dim, latent_dim // self.nb_heads, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
+                                    nn.ReLU(inplace=True),
+                                    (gnn.GATv2Conv(latent_dim, latent_dim // self.nb_heads, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
+                                    nn.ReLU(inplace=True),
+                                    (gnn.GATv2Conv(latent_dim, latent_dim // self.nb_heads, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
                                     nn.ReLU(inplace=True),
                                     nn.Linear(latent_dim, input_dim),
                                     nn.Softmax(dim=-1)
@@ -216,19 +222,22 @@ class CausalTransition(nn.Module):
         # preprocess
         if self.noise == "exo":
             latent = latent + torch.normal(0,1,latent.shape).to(latent.device) # noise integrated to variables
-            padding = torch.nn.ConstantPad2d((0,1,0,1),1) 
+            padding_h = torch.nn.ConstantPad2d((0,0,0,1),0)
+            padding_v = torch.nn.ConstantPad2d((0,1,0,0),1)
             var_supp = action.unsqueeze(1)
         elif self.noise == "endo":
-            padding = torch.nn.ConstantPad2d((0,2,0,2),1) # noise as extra variable
+            padding_h = torch.nn.ConstantPad2d((0,0,0,2),0)
+            padding_v = torch.nn.ConstantPad2d((0,2,0,0),1) # noise as extra variable
             var_supp = torch.stack([action, torch.normal(0,1,action.shape).to(action.device)],dim=1)
         else:
-            padding = torch.nn.ConstantPad2d((0,1,0,1),1) 
+            padding_h = torch.nn.ConstantPad2d((0,0,0,1),0)
+            padding_v = torch.nn.ConstantPad2d((0,1,0,0),1)
             var_supp = action.unsqueeze(1)
             
         nodes = torch.concat([latent,var_supp],1).view((-1,latent.size(-1))) # [(BHW+vs) x D]
-        padded_adjacency = padding(adjacency) # add missing edges to action
+        padded_adjacency = padding_h(padding_v(adjacency)) # add missing edges to action
 
-        edge_index, edge_attrs = torch_geometric.utils.dense_to_sparse(padded_adjacency) # format to edge_index [2 x E] and edge_attrs [E x 1] 
+        edge_index, edge_attrs = torch_geometric.utils.dense_to_sparse(padded_adjacency) # format to edge_index [2 x E] and edge_attrs [E] 
         
         # Graph Neural Network computation
         nodes_y = self.graph_transitioner(nodes, edge_index, edge_attr=edge_attrs) # [B(HW+vs) x D]
@@ -387,6 +396,7 @@ class CTMCQVAE(BaseVAE):
                  num_embeddings: int,
                  hidden_dims: List = None,
                  causal_hidden_dim: int = 800,
+                 causal_nb_heads: int = 1,
                  beta: float = 0.25,
                  gamma: float = 0.25,
                  img_size: int = 64,
@@ -445,6 +455,7 @@ class CTMCQVAE(BaseVAE):
         self.ct_layer = CausalTransition(num_embeddings, #embedding_dim//codebooks,
                                         action_dim,
                                         causal_hidden_dim,
+                                        causal_nb_heads,
                                         **kwargs)
 
         # Build Decoder

@@ -1,19 +1,21 @@
 model_params:
   name: 'CTMCQVAE'
   in_channels: 3
-  embedding_dim: 64
+  embedding_dim: 128
   action_dim: 6
   hidden_dims: [128, 256]
   causal_hidden_dim: 800
+  causal_nb_heads: 4
   num_embeddings: 32
   img_size: 64
   codebooks: 1
   beta: 0.25
-  c_alpha: 0.4
-  c_beta: 0.5
-  c_gamma: 0.3
+  gamma: 0.1
+  c_alpha: 0.2
+  c_beta: 0.0
+  c_gamma: 0.4
   c_delta: 0.1
-  c_epsilon: 0.1
+  c_epsilon: 0.2
   noise: "endo"
 
 data_params:
