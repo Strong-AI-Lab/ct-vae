@@ -17,8 +17,6 @@ def detach_and_paste(func):
         return x + (y - x).detach(), *remain
     return inner
 
-
-
 class PositionalEncoding(nn.Module):
     """
     Inspired by <https://pytorch.org/tutorials/beginner/transformer_tutorial.html>
@@ -57,7 +55,6 @@ class CausalTransition(nn.Module):
                  noise: str = "off",
                  c_alpha: float = 0.7,
                  c_beta: float = 0.4,
-                 c_gamma: float = 0.9,
                  c_delta: float = 0.4,
                  c_epsilon: float = 0.4,
                  comp_adj_optim: str = "comp",
@@ -69,7 +66,6 @@ class CausalTransition(nn.Module):
                         "endo": noise is an extra endogenous variable in the causal graph.
         :param c_alpha: (float) Factor leveraging the trend towards identity behaviour when no causal changes.
         :param c_beta: (float) Variational loss.
-        :param c_gamma: (float) Factor leveraging the loss of the adjacency matrix coefficients.
         :param c_delta: (float) Factor regularising the size of the causal graph.
         :param c_epsilon: (float) Factor leveraging the confidence that the learned adjacency matrix is not empty
         :param comp_adj_optim: (str) Computation tradeoff for graph discovery optimization. 
@@ -83,7 +79,6 @@ class CausalTransition(nn.Module):
         self.noise = noise
         self.alpha = c_alpha
         self.beta = c_beta
-        self.gamma = c_gamma
         self.delta = c_delta
         self.epsilon = c_epsilon
         self.comp_adj_optim = self._compute_adj__mem_optim if comp_adj_optim == "mem" else self._compute_adj__comp_optim
@@ -92,41 +87,21 @@ class CausalTransition(nn.Module):
 
         self.pos_encoding = PositionalEncoding(input_dim) # Positional encodingfor causal variables
 
-        a_discovers = []
+        discovers = []
         for _ in range(action_dim + 1):
-            a_discovers.append(
+            discovers.append(
                     nn.Sequential(
                     nn.Linear(2 * input_dim, latent_dim),
                     nn.LeakyReLU(),
                     nn.Linear(latent_dim, 1),
                     nn.Sigmoid()
                     ))
-        
-        y_discovers = []
-        for _ in range(input_dim + 1):
-            y_discovers.append(
-                    nn.Sequential(
-                    nn.Linear(2 * input_dim, latent_dim),
-                    nn.LeakyReLU(),
-                    nn.Linear(latent_dim, 1),
-                    nn.Sigmoid()
-                    ))
+        self.graph_discovers = nn.ModuleList(discovers)
 
-        self.graph_discovers = nn.ModuleDict({
-                "a" : nn.ModuleList(a_discovers), # Computation of adjacency matrix coefficients in action mode
-                "y" : nn.ModuleList(y_discovers) # Computation of adjacency matrix coefficients in causal mode
-            })
-
-        self.masks = nn.ModuleDict({
-                "a" : nn.Sequential(
+        self.mask = nn.Sequential(
                         nn.Linear(action_dim, input_dim),
                         nn.Sigmoid()
-                    ), # Action intervention masking, selects adjacency matrix discoverer corresponding to action a
-                "y" : nn.Sequential(
-                        nn.Linear(input_dim, input_dim),
-                        nn.Sigmoid()
-                    ) # Causal intervention masking, selects adjacency matrix discoverer corresponding to output y
-            })
+                    ) # Action intervention masking, selects adjacency matrix discoverer corresponding to action a
 
         self.nb_heads = nb_heads
         self.graph_transitioner = gnn.Sequential('x, edge_index, edge_attr', [
@@ -141,19 +116,18 @@ class CausalTransition(nn.Module):
                                 ]) # Causal graph inference
 
 
-    def _compute_mask(self, one_hot_latent, aux, mode = "a"): # TODO: assess if mask needed for y mode since already know if variable affected by intervention
-        if mode == "a":
-            aux = aux.unsqueeze(1).repeat(1,one_hot_latent.size(1), 1)
+    def _compute_mask(self, one_hot_latent, action):
+        action = action.unsqueeze(1).repeat(1,one_hot_latent.size(1), 1)
 
-        inter_mask = self.masks[mode](aux.to(dtype=torch.float32))
+        inter_mask = self.mask(action.to(dtype=torch.float32))
         inter_masked_latent = (one_hot_latent * inter_mask ).sum(dim=-1) # [B x HW]
         logits = torch.log(torch.stack([1 - inter_masked_latent, inter_masked_latent],dim=-1).clamp(min=1e-4)) # [B x HW x 2], clamp to avoid -inf values
 
         mask = F.gumbel_softmax(logits,tau=1,hard=True)[...,1].unsqueeze(-1) # [B x HW x 1]
         return mask
 
-    def _split_by_inter(self, aux):
-        inter_ids = torch.argmax(aux, dim=-1) # [B x HW x A] --> [B x HW] if action mode else [B x HW x D] --> [B x HW]
+    def _split_by_inter(self, action):
+        inter_ids = torch.argmax(action, dim=-1) # [B x HW x A] --> [B x HW]
         inter_dict = {id:torch.where(inter_ids==id) for id in set(inter_ids.view((-1)).tolist())}
         return inter_dict
 
@@ -163,29 +137,25 @@ class CausalTransition(nn.Module):
             res[inter_dict[i]] = inter_coeffs_dict[i]
         return res        
 
-    def _compute_adj__comp_optim(self, latent, aux, mask, mode = "a"): # /!\ big memory needed!
+    def _compute_adj__comp_optim(self, latent, action, mask): # /!\ big memory needed!
         repeats = latent.size(1)
         nodes_i = latent.repeat(1,1,repeats).view((latent.size(0),-1,latent.size(2))) # [B x HW x D] --> [B x HWHW x D]
         nodes_j = latent.repeat(1,repeats,1) # [B x HW x D] --> [B x HWHW x D]
         
         inp = torch.concat([nodes_i,nodes_j],-1) # [B x HWHW x 2D]
 
-        no_inter_coeffs = self.graph_discovers[mode][0](inp).view((-1,repeats,repeats)) # [B x HW x HW]
-
-        if mode == "a":
-            aux = aux.unsqueeze(1).repeat(1,inp.size(1), 1)
+        no_inter_coeffs = self.graph_discovers[0](inp).view((-1,repeats,repeats)) # [B x HW x HW]
+        action = action.unsqueeze(1).repeat(1,inp.size(1), 1)
             
-        inter_dict = self._split_by_inter(aux)
-        inter_coeffs_dict = {i: self.graph_discovers[mode][1+i](inp[indices]) for i, indices in inter_dict.items()}
+        inter_dict = self._split_by_inter(action)
+        inter_coeffs_dict = {i: self.graph_discovers[1+i](inp[indices]) for i, indices in inter_dict.items()}
         inter_coeffs = self._merge_inter(inter_dict, inter_coeffs_dict, (inp.size(0), inp.size(1), 1), inp.device).view((-1,repeats,repeats))
 
         return no_inter_coeffs * (1 - mask) + inter_coeffs * mask
     
-    def _compute_adj__mem_optim(self, latent, aux, mask, mode = "a"): # /!\ very big computation graph!
+    def _compute_adj__mem_optim(self, latent, action, mask): # /!\ very big computation graph!
         repeats = latent.size(1)
-        
-        if mode == "a":
-            aux = aux.unsqueeze(1).repeat(1,repeats,1) # [B x A] --> [B x HW x A]
+        action = action.unsqueeze(1).repeat(1,repeats,1) # [B x A] --> [B x HW x A]
 
         no_inter_coeffs = torch.zeros((latent.size(0), repeats, repeats)).to(latent.device)  # [B x HW x HW]
         inter_coeffs = torch.zeros((latent.size(0), repeats, repeats)).to(latent.device)  # [B x HW x HW]
@@ -195,16 +165,16 @@ class CausalTransition(nn.Module):
             nodes_j = latent
             inp = torch.concat([nodes_i, nodes_j],-1)
             
-            no_inter_coeffs[:,i] = self.graph_discovers[mode][0](inp).view((latent.size(0), repeats))
+            no_inter_coeffs[:,i] = self.graph_discovers[0](inp).view((latent.size(0), repeats))
 
-            inter_dict = self._split_by_inter(aux)
-            inter_coeffs_dict = {i: self.graph_discovers[mode][1+i](inp[indices]) for i, indices in inter_dict.items()}
+            inter_dict = self._split_by_inter(action)
+            inter_coeffs_dict = {i: self.graph_discovers[1+i](inp[indices]) for i, indices in inter_dict.items()}
             inter_coeffs[:,i] = self._merge_inter(inter_dict, inter_coeffs_dict, (inp.size(0), inp.size(1), 1), inp.device).view((latent.size(0), repeats))
             
         return no_inter_coeffs * (1 - mask) + inter_coeffs * mask
 
-    def _compute_adj(self, latent, aux, mask, mode = "a"):
-        return self.comp_adj_optim(latent, aux, mask, mode)
+    def _compute_adj(self, latent, action, mask):
+        return self.comp_adj_optim(latent, action, mask)
 
 
     def _sample_bernoulli(self, adjacency, differentiable=True):
@@ -247,22 +217,6 @@ class CausalTransition(nn.Module):
         return nodes_y.view((action_latent_shape))[:,:-var_supp_size,:] # [B x HW x D] (remove action and noise nodes) 
 
 
-    def _infer_action(self, adjacency_coeffs, latent, differentiable=True):
-        a = F.one_hot(torch.arange(self.action_dim).repeat(latent.size(0))).view((latent.size(0),self.action_dim,self.action_dim)).to(latent.device, dtype=latent.dtype) # [B x A x A]
-        a = a.permute(1,0,2) # [A x B x A]
-        pos_latent = self.pos_encoding(latent)  # add positional embeddings
-
-        distances = torch.zeros((a.size(1),self.action_dim)).to(a.device) # [B x A]
-        for i in range(self.action_dim):
-            mask = self._compute_mask(latent, a[i], mode="a")
-            adj_i = self._compute_adj(pos_latent, a[i], mask, "a")
-            adj_i = adj_i.detach().clone() # prevents backpropagation
-            distances[:,i] = F.pairwise_distance(adjacency_coeffs.view((a.size(1), -1)), adj_i.view((a.size(1), -1)))
-        probas = 1-torch.softmax(distances,dim=-1)
-        
-        return probas # [B x A]
-
-
     # @detach_and_paste
     def forward(self, latent: Tensor, **kwargs) -> List[Tensor]:
         latent_shape = latent.shape # [B x D x H x W]
@@ -273,7 +227,7 @@ class CausalTransition(nn.Module):
         action = torch.zeros(latent.size(0), self.action_dim).to(latent.device) # [B x A]
 
         # Compute causal graph
-        adjacency_coeffs = self._compute_adj(pos_latent, action, mask, "a")
+        adjacency_coeffs = self._compute_adj(pos_latent, action, mask)
         causal_graph = self._sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
@@ -285,7 +239,7 @@ class CausalTransition(nn.Module):
         ct_reg = self.alpha * (
                     F.cross_entropy(self._compute_y(pos_latent, action, id_matrix).reshape((-1, latent_shape[1])).clamp(min=1e-4).log(), latent.reshape((-1, latent_shape[1])).argmax(dim=-1))
                     + F.mse_loss(causal_graph, id_matrix)
-                ) + self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, latent_y, "y") + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
+                ) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
         latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x D x H x W]
         return [latent_y, ct_reg, {"ct_adjacency": adjacency_coeffs.mean(0)}]
@@ -296,11 +250,11 @@ class CausalTransition(nn.Module):
         latent_shape = latent.shape # [B x D x H x W]
         latent = latent.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]
 
-        mask = self._compute_mask(latent, action, mode="a")
+        mask = self._compute_mask(latent, action)
         pos_latent = self.pos_encoding(latent)  # add positional embeddings
 
         # Compute causal graph
-        adjacency_coeffs = self._compute_adj(pos_latent, action, mask, "a")
+        adjacency_coeffs = self._compute_adj(pos_latent, action, mask)
         causal_graph = self._sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
@@ -308,7 +262,7 @@ class CausalTransition(nn.Module):
         latent_y = self._compute_y(pos_latent, action, causal_graph) # [B x HW x D]
 
         # Compute loss function
-        ct_reg = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, latent_y, "y") + self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
+        ct_reg = self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
         latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x D x H x W]
         return [latent_y, ct_reg, {"ct_mask": mask.view(latent_shape[:1]+latent_shape[2:]).mean(0), "ct_adjacency": adjacency_coeffs.mean(0)}]
@@ -316,25 +270,20 @@ class CausalTransition(nn.Module):
     
     # no @detach_and_paste since causal model also acts as decoder for this setting
     def forward_transition(self, latent: Tensor, latent_y: Tensor, **kwargs) -> List[Tensor]:
-        latent_shape = latent.shape # [B x D x H x W]
-        latent = latent.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]
-        latent_y = latent_y.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]
+        actions = F.one_hot(torch.arange(self.action_dim).repeat(latent.size(0))).view((latent.size(0),self.action_dim,self.action_dim)).to(latent.device, dtype=latent.dtype) # [B x A x A]
+        actions = actions.permute(1,0,2) # [A x B x A]
         
-        mask = self._compute_mask(latent, latent_y, mode="y")
-        pos_latent = self.pos_encoding(latent)  # add positional embeddings
-        
-        # Compute causal graph
-        adjacency_coeffs = self._compute_adj(pos_latent, latent_y, mask, "y")
+        distances = torch.zeros((actions.size(1),self.action_dim)).to(latent.device) # [B x A]
+        y_inds = latent_y.permute(0,2,3,1).view((-1, latent_y.size(1))).argmax(dim=-1) # [BHW]
+        for i in range(self.action_dim):
+            y = self.forward_action(latent, actions[i])[0]
+            y_log = y.permute(0,2,3,1).view((-1, latent_y.size(1))).log() # [BHW x D]
+            unbatched_distances = F.cross_entropy(y_log, y_inds, reduction='none') # [BHW]
+            distances[:,i] = unbatched_distances.view((latent_y.size(0), -1)).mean(dim=-1) # [B]
 
-        # Infer a
-        action_probas = self._infer_action(adjacency_coeffs, latent)
-        action = F.one_hot(torch.argmax(action_probas,dim=1))
+        action_probas = 1 - torch.softmax(distances,dim=-1)
 
-        # Compute loss function
-        causal_graph = self._sample_bernoulli(adjacency_coeffs)
-        ct_reg = self.gamma * self.dependencies_MSE_loss(adjacency_coeffs, latent, action, "a") + self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
-
-        return [action_probas, ct_reg, {"ct_mask": mask.view(latent_shape[:1]+latent_shape[2:]).mean(0), "ct_adjacency": adjacency_coeffs.mean(0)}]
+        return [action_probas, torch.tensor(0.0), {}]
 
 
     
@@ -354,27 +303,6 @@ class CausalTransition(nn.Module):
     
     def latent_KL_loss(self, latent, latent_y):
         return F.kl_div(latent.clamp(min=1e-4).log(), latent_y, reduction="batchmean")
-
-
-    def dependencies_MSE_loss(self, adjacency_coeffs, one_hot_latent, action, mode = "a"):
-        adjacency_coeffs = adjacency_coeffs.detach()
-        one_hot_latent = one_hot_latent.detach()
-        action = action.detach()
-        mask = self._compute_mask(one_hot_latent, action, mode)
-        pos_latent = self.pos_encoding(one_hot_latent)
-
-        twin_coeffs = self._compute_adj(pos_latent, action, mask, mode)
-        return F.mse_loss(twin_coeffs, adjacency_coeffs)
-    
-    def dependencies_KL_loss(self, causal_graph, one_hot_latent, action, mode = "a"):
-        causal_graph = causal_graph.detach()
-        one_hot_latent = one_hot_latent.detach()
-        action = action.detach()
-        mask = self._compute_mask(one_hot_latent, action, mode)
-        pos_latent = self.pos_encoding(one_hot_latent)
-
-        twin_cg = self._sample_bernoulli(self._compute_adj(pos_latent, action, mask, mode))
-        return F.kl_div(twin_cg.log(), causal_graph, reduction="batchmean")
 
 
     def graph_size_loss(self, causal_graph):
