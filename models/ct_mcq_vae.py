@@ -119,11 +119,11 @@ class CausalTransition(nn.Module):
 
         self.masks = nn.ModuleDict({
                 "a" : nn.Sequential(
-                        nn.Linear(action_dim + 1, input_dim),
+                        nn.Linear(action_dim, input_dim),
                         nn.Sigmoid()
                     ), # Action intervention masking, selects adjacency matrix discoverer corresponding to action a
                 "y" : nn.Sequential(
-                        nn.Linear(input_dim + 1, input_dim),
+                        nn.Linear(input_dim, input_dim),
                         nn.Sigmoid()
                     ) # Causal intervention masking, selects adjacency matrix discoverer corresponding to output y
             })
@@ -145,12 +145,9 @@ class CausalTransition(nn.Module):
         if mode == "a":
             aux = aux.unsqueeze(1).repeat(1,one_hot_latent.size(1), 1)
 
-        inter_mask = self.masks[mode](F.pad(aux,(1,0),"constant",0).to(dtype=torch.float32))
-        no_inter_mask = self.masks[mode](F.one_hot(torch.zeros((aux.size(0), aux.size(1)),dtype=torch.int64), num_classes=aux.size(-1)+1).to(one_hot_latent.device, dtype=torch.float32))
-
+        inter_mask = self.masks[mode](aux.to(dtype=torch.float32))
         inter_masked_latent = (one_hot_latent * inter_mask ).sum(dim=-1) # [B x HW]
-        no_inter_masked_latent = (one_hot_latent * no_inter_mask).sum(dim=-1) # [B x HW]
-        logits = torch.log(torch.stack([no_inter_masked_latent, inter_masked_latent],dim=-1).clamp(min=1e-4)) # [B x HW x 2], clamp to avoid -inf values
+        logits = torch.log(torch.stack([1 - inter_masked_latent, inter_masked_latent],dim=-1).clamp(min=1e-4)) # [B x HW x 2], clamp to avoid -inf values
 
         mask = F.gumbel_softmax(logits,tau=1,hard=True)[...,1].unsqueeze(-1) # [B x HW x 1]
         return mask
