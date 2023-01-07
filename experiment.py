@@ -99,10 +99,8 @@ class VAEXperiment(pl.LightningModule):
                     logger = self.loggers[1]
                     if type(val) == torch.Tensor and (len(val.shape) == 2 or (len(val.shape) == 3 and val.size(0) in [1,3,4])):
                         logger.log_image(key=key, images=[wandb.Image(val)])
-                        to_remove.append(key)
                     elif type(val) ==  wandb.Image:
                         logger.log_image(key=key, images=[val])
-
                 to_remove.append(key)
         for key in to_remove:
             del losses[key]
