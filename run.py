@@ -15,7 +15,7 @@ from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from pytorch_lightning.utilities.seed import seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from dataset import VAEDataset
-from pytorch_lightning.plugins import DDPPlugin
+from pytorch_lightning.strategies import DDPStrategy
 
 
 parser = argparse.ArgumentParser(description='Generic runner for VAE models')
@@ -91,7 +91,8 @@ runner = Trainer(logger=[tb_logger, wb_logger],
                                      monitor= "val_Reconstruction_Loss",
                                      save_last= True),
                  ],
-                 strategy=DDPPlugin(find_unused_parameters=config['exp_params']['find_unused_parameters']),
+                 strategy=DDPStrategy(find_unused_parameters=config['exp_params']['find_unused_parameters']),
+                 replace_sampler_ddp = False,
                  **config['trainer_params'])
 
 

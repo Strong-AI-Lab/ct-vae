@@ -121,7 +121,7 @@ class CausalTransition(nn.Module):
 
         inter_mask = self.mask(action.to(dtype=torch.float32))
         inter_masked_latent = (one_hot_latent * inter_mask ).sum(dim=-1) # [B x HW]
-        logits = torch.log(torch.stack([1 - inter_masked_latent, inter_masked_latent],dim=-1).clamp(min=1e-4)) # [B x HW x 2], clamp to avoid -inf values
+        logits = torch.stack([1 - inter_masked_latent, inter_masked_latent],dim=-1).clamp(min=1e-4).log() # [B x HW x 2], clamp to avoid -inf values
 
         mask = F.gumbel_softmax(logits,tau=1,hard=True)[...,1].unsqueeze(-1) # [B x HW x 1]
         return mask
@@ -179,7 +179,7 @@ class CausalTransition(nn.Module):
 
     def _sample_bernoulli(self, adjacency, differentiable=True):
         if differentiable: # reparametrization trick using Straight-through Gumbel-Softmax
-            logits = torch.log(torch.stack([1-adjacency,adjacency],dim=-1).clamp(min=1e-4)) # clamp to avoid -inf values
+            logits = torch.stack([1-adjacency,adjacency],dim=-1).clamp(min=1e-4).log() # clamp to avoid -inf values
             return F.gumbel_softmax(logits,tau=1,hard=True)[...,1]
         else:
             return torch.bernoulli(adjacency)
@@ -277,7 +277,7 @@ class CausalTransition(nn.Module):
         y_inds = latent_y.permute(0,2,3,1).view((-1, latent_y.size(1))).argmax(dim=-1) # [BHW]
         for i in range(self.action_dim):
             y = self.forward_action(latent, actions[i])[0]
-            y_log = y.permute(0,2,3,1).reshape((-1, latent_y.size(1))).log() # [BHW x D]
+            y_log = y.permute(0,2,3,1).reshape((-1, latent_y.size(1))).clamp(min=1e-4).log() # [BHW x D]
             unbatched_distances = F.cross_entropy(y_log, y_inds, reduction='none') # [BHW]
             distances[:,i] = unbatched_distances.view((latent_y.size(0), -1)).mean(dim=-1) # [B]
             
@@ -493,7 +493,7 @@ class CTMCQVAE(BaseVAE):
         quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, ct_encodings)
 
         # Decoding
-        return [self.decode(quantized_latents), input, vq_loss, ct_loss, {**{"mode" : "base", "mode_id": torch.tensor(0)}, **ct_metrics[0]}]
+        return [self.decode(quantized_latents), input, vq_loss, ct_loss, {**{"causal_acc": torch.tensor(0.0), "mode" : "base", "mode_id": torch.tensor(0.0)}, **ct_metrics[0]}]
 
         
     def forward_action(self, input: Tensor, action: Tensor, input_y: Tensor = None, **kwargs) -> List[Tensor]:
@@ -514,7 +514,7 @@ class CTMCQVAE(BaseVAE):
         quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, ct_encodings)
         
         # Decoding
-        return [self.decode(quantized_latents), input_y, vq_loss, ct_loss, {**{"mode" : "action", "mode_id": torch.tensor(1)}, **ct_metrics[0]}]
+        return [self.decode(quantized_latents), input_y, vq_loss, ct_loss, {**{"causal_acc": torch.tensor(0.0), "mode" : "action", "mode_id": torch.tensor(1.0)}, **ct_metrics[0]}]
 
 
     def forward_causal(self, input: Tensor, input_y: Tensor, action: Tensor = None, **kwargs) -> List[Tensor]:
@@ -534,7 +534,7 @@ class CTMCQVAE(BaseVAE):
         ct_acc = (torch.argmax(recons_action, dim=-1)==torch.argmax(action, dim=-1)).float().mean()
         
         # Decoding
-        return [recons_action, action, torch.tensor(0.0), ct_reg, {**{"causal_acc": ct_acc, "mode": "causal", "mode_id": torch.tensor(2)}, **ct_metrics[0]}]
+        return [recons_action, action, torch.tensor(0.0), ct_reg, {**{"causal_acc": ct_acc, "mode": "causal", "mode_id": torch.tensor(2.0)}, **ct_metrics[0]}]
 
 
     FORWARD_MODES = {

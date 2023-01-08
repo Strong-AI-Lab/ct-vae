@@ -2,10 +2,10 @@
 import os
 
 import torch
-from torch.utils.data import Dataset, Subset
+from torch.utils.data import Dataset, Subset, Sampler, BatchSampler, SequentialSampler, RandomSampler, DistributedSampler
 
 from collections import namedtuple
-from typing import Optional, List
+from typing import Optional, List, Iterator
 import random
 import csv
 
@@ -123,3 +123,71 @@ class TransitionDataset(Dataset):
         splits = [int(row[6]) for row in data]
 
         return T_CSV(inputs, outputs, variations, sources, targets, splits)
+
+
+class TransitionBatchSampler(Sampler):
+    
+    def __init__(self, 
+        data: TransitionDataset, 
+        shuffle: bool, 
+        batch_size: int, 
+        drop_last: bool, 
+        limit: Optional[int] = None, 
+        distributed: bool = False
+        ) -> None:
+        """
+        Batch sampler generating batches of a TransitionDataset such that each batch 
+        can be of mode ``base``, ``action``, or ``causal``. One batch contains only
+        samples with the same mode.
+
+        :param data: (TransitionDataset) Input transition dataset
+        :param shuffle: (bool) If true, uses a RandomSampler as sampling strategy, 
+                        otherwise, uses SequantialSampler
+        :param batch_size: (int) Size of mini-batch.
+        :param drop_last: (bool) If ``True``, the sampler will drop the last batch 
+                        if its size would be less than ``batch_size``
+        :param limit: (Optional[int]) If set, restricts the size of the dataset to 
+                        ``limit`` elements drawn randomly
+        :param distributed: (bool) If true, creates an instance of DistributedSampler 
+                        as part of the sampling strategy
+        """
+        if shuffle:
+            sampler_class = RandomSampler
+        else:
+            sampler_class = SequentialSampler
+
+        self.shuffle = shuffle
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.limit = limit
+        self.distributed = distributed
+
+        self.indices = [
+            data.subset("base", limit).indices,
+            data.subset("action", limit).indices,
+            data.subset("causal", limit).indices
+        ]
+        self.samplers = [BatchSampler(sampler_class(indices), batch_size, drop_last) for indices in self.indices]
+        self.samplers_len = [len(sampler) for sampler in self.samplers]
+
+        self.meta_indices = [0] * self.samplers_len[0] + [1] * self.samplers_len[1] + [2] * self.samplers_len[2]
+        
+        if distributed:
+            self.meta_sampler = DistributedSampler(self.meta_indices, shuffle=shuffle, drop_last=drop_last)
+        else:
+            self.meta_sampler = sampler_class(self.meta_indices)
+
+    def __iter__(self) -> Iterator[List[int]]:
+        meta_sampler_iter = iter(self.meta_sampler)
+        samplers_iter = [iter(sampler) for sampler in self.samplers]
+        while True:
+            try:
+                mid = self.meta_indices[next(meta_sampler_iter)]
+            except StopIteration: # No indices left
+                break
+
+            batch = [self.indices[mid][id] for id in next(samplers_iter[mid])]
+            yield batch
+
+    def __len__(self) -> int:
+        return len(self.meta_sampler)

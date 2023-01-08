@@ -1,12 +1,13 @@
 
 from typing import List, Optional, Sequence, Union
 from pytorch_lightning import LightningDataModule
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, BatchSampler
 from torchvision import transforms
 
 from datasets.celeba_dataset import MyCelebA, TCeleba
 from datasets.disent_dataset import MyCars3D, MyDSprites, MySmallNORB, MyShapes3D, MySprites, TCars3D, TDSprites, TSmallNORB, TShapes3D, TSprites
 from datasets.oxford_dataset import OxfordPets
+from datasets.transition import TransitionBatchSampler
 
 
 
@@ -50,7 +51,6 @@ class VAEDataset(LightningDataModule):
         patch_size: Union[int, Sequence[int]] = (256, 256),
         num_workers: int = 0,
         pin_memory: bool = False,
-        mode: str = "base",
         limit: Optional[int] = None,
         **kwargs,
     ):
@@ -63,20 +63,10 @@ class VAEDataset(LightningDataModule):
         self.patch_size = patch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
-        self.mode = mode
         self.limit = limit
-    
-    def get_mode(self, it):
-        if type(self.mode) is str:
-            return self.mode
-        if type(self.mode) is list:
-            return self.mode[it % len(self.mode)]
-        raise TypeError("Mode has incorrect type")
 
-    def setup(self, stage: Optional[str] = None) -> None:   
-#       =========================  CelebA Dataset  =========================
-        self.iteration = 0
-    
+    def setup(self, stage: Optional[str] = None) -> None:
+
         train_transforms = transforms.Compose([transforms.ToTensor(),
                                               transforms.RandomHorizontalFlip(),
                                               transforms.CenterCrop(148),
@@ -104,29 +94,44 @@ class VAEDataset(LightningDataModule):
         
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
-            self.train_dataset.subset(self.get_mode(self.iteration), self.limit),
-            batch_size=self.train_batch_size,
+            self.train_dataset,
+            batch_sampler=TransitionBatchSampler(
+                    self.train_dataset, 
+                    shuffle=True,
+                    batch_size=self.train_batch_size,
+                    drop_last=True,
+                    distributed=True,
+                    limit=self.limit
+                    ),
             num_workers=self.num_workers,
-            shuffle=True,
             pin_memory=self.pin_memory,
         )
 
     def val_dataloader(self) -> Union[DataLoader, List[DataLoader]]:
         return DataLoader(
-            self.val_dataset.subset(self.get_mode(self.iteration)),
-            batch_size=self.val_batch_size,
+            self.val_dataset,
+            batch_sampler=TransitionBatchSampler(
+                    self.val_dataset, 
+                    shuffle=False,
+                    batch_size=self.val_batch_size,
+                    drop_last=True,
+                    distributed=True
+                    ),
             num_workers=self.num_workers,
-            shuffle=False,
             pin_memory=self.pin_memory,
         )
     
     def test_dataloader(self) -> Union[DataLoader, List[DataLoader]]:
-        self.iteration += 1
         return DataLoader(
-            self.val_dataset.subset(self.get_mode(self.iteration - 1)),
-            batch_size=self.val_batch_size,#144,
+            self.val_dataset,
+            batch_sampler=TransitionBatchSampler(
+                    self.val_dataset, 
+                    shuffle=True,
+                    batch_size=self.val_batch_size,
+                    drop_last=True,
+                    distributed=True
+                    ),
             num_workers=self.num_workers,
-            shuffle=True,
             pin_memory=self.pin_memory,
         )
      

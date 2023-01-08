@@ -24,8 +24,6 @@ data_params:
   val_batch_size: 16
   patch_size: 64
   num_workers: 4
-  mode: ["causal", "base", "action"]
-
 
 exp_params:
   # metrics: ["DCI", "MIG", "SAP", "FactorVaeScore"]
