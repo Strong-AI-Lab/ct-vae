@@ -79,6 +79,7 @@ def hyp_search(config):
                         TuneReportCallback({"loss": "val_Reconstruction_Loss"}, on="validation_end"),
                     ],
                     strategy=DDPPlugin(find_unused_parameters=config['exp_params']['find_unused_parameters']),
+                    replace_sampler_ddp = False,
                     **config['trainer_params'])
 
     runner.fit(experiment, datamodule=data)

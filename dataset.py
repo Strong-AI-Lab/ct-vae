@@ -52,6 +52,7 @@ class VAEDataset(LightningDataModule):
         num_workers: int = 0,
         pin_memory: bool = False,
         limit: Optional[int] = None,
+        distributed: bool = True,
         **kwargs,
     ):
         super().__init__()
@@ -64,16 +65,17 @@ class VAEDataset(LightningDataModule):
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.limit = limit
+        self.distributed = distributed
 
     def setup(self, stage: Optional[str] = None) -> None:
 
         train_transforms = transforms.Compose([transforms.ToTensor(),
-                                              transforms.RandomHorizontalFlip(),
+                                            #   transforms.RandomHorizontalFlip(),
                                               transforms.CenterCrop(148),
                                               transforms.Resize(self.patch_size)])
         
         val_transforms = transforms.Compose([transforms.ToTensor(),
-                                            transforms.RandomHorizontalFlip(),
+                                            # transforms.RandomHorizontalFlip(),
                                             transforms.CenterCrop(148),
                                             transforms.Resize(self.patch_size),])
                                             
@@ -100,7 +102,7 @@ class VAEDataset(LightningDataModule):
                     shuffle=True,
                     batch_size=self.train_batch_size,
                     drop_last=True,
-                    distributed=True,
+                    distributed=self.distributed,
                     limit=self.limit
                     ),
             num_workers=self.num_workers,
@@ -115,7 +117,7 @@ class VAEDataset(LightningDataModule):
                     shuffle=False,
                     batch_size=self.val_batch_size,
                     drop_last=True,
-                    distributed=True
+                    distributed=self.distributed
                     ),
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
@@ -129,7 +131,7 @@ class VAEDataset(LightningDataModule):
                     shuffle=True,
                     batch_size=self.val_batch_size,
                     drop_last=True,
-                    distributed=True
+                    distributed=self.distributed
                     ),
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,

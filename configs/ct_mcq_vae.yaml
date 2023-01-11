@@ -2,28 +2,30 @@ model_params:
   name: 'CTMCQVAE'
   in_channels: 3
   embedding_dim: 128
-  action_dim: 6
-  hidden_dims: [128, 256]
+  action_dim: 12
+  hidden_dims: [64, 128, 256]
   causal_hidden_dim: 800
   causal_nb_heads: 4
   num_embeddings: 32
   img_size: 64
-  codebooks: 1
+  codebooks: 2
   beta: 0.25
   gamma: 0.05
-  c_alpha: 0.6
-  c_beta: 0.0
-  c_delta: 0.01
+  c_alpha: 1.0
+  c_beta: 0.1
+  c_delta: 0.001
   c_epsilon: 0.1
-  noise: "off"
+  noise: "endo"
 
 data_params:
   data_path: "Data/"
-  dataset_name: "TCars3D"
-  train_batch_size: 16
-  val_batch_size: 16
+  dataset_name: "TShapes3D"
+  train_batch_size: 8
+  val_batch_size: 8
   patch_size: 64
   num_workers: 4
+  limit: 16000
+  # distributed: False
 
 exp_params:
   # metrics: ["DCI", "MIG", "SAP", "FactorVaeScore"]

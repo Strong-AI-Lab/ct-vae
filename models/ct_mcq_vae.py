@@ -308,7 +308,7 @@ class CausalTransition(nn.Module):
         return torch.linalg.norm(causal_graph)
     
     def positive_trial_loss(self, adjacency_coeffs):
-        return torch.linalg.norm((1-adjacency_coeffs).prod(1))
+        return torch.linalg.norm((1-adjacency_coeffs).prod(-1))
 
 
 
@@ -428,7 +428,7 @@ class CTMCQVAE(BaseVAE):
         """
         Encodes the input by passing through the encoder network
         and returns the latent codes.
-        :param input: (Tensor) Input tensor to encoder [N x C x H x W]
+        :param input: (Tensor) Input tensor to encoder [B x C x H x W]
         :return: (Tensor) List of latent codes
         """
         result = self.encoder(input)
@@ -511,10 +511,10 @@ class CTMCQVAE(BaseVAE):
         ct_encodings = self.ct_postprocess(ct_encodings, latents_shape)
 
         # Quantization latent retrieval
-        quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, ct_encodings)
+        quantized_latents, _ = self.vq_layer.compute_latents(latents, ct_encodings)
         
         # Decoding
-        return [self.decode(quantized_latents), input_y, vq_loss, ct_loss, {**{"causal_acc": torch.tensor(0.0), "mode" : "action", "mode_id": torch.tensor(1.0)}, **ct_metrics[0]}]
+        return [self.decode(quantized_latents), input_y, torch.tensor(0.0), ct_loss, {**{"causal_acc": torch.tensor(0.0), "mode" : "action", "mode_id": torch.tensor(1.0)}, **ct_metrics[0]}]
 
 
     def forward_causal(self, input: Tensor, input_y: Tensor, action: Tensor = None, **kwargs) -> List[Tensor]:
@@ -552,7 +552,7 @@ class CTMCQVAE(BaseVAE):
                 "action": encode input and decode it after action transition
                 "causal": from input and input_y after transition, deduce the actions needed for transition
         """
-        if type(mode) is list:
+        if type(mode) is list: # In current version, all elements of a batch must have the same mode
             mode = mode[0]
         if input_y is not None:
             input_y = input_y.to(input.device)
