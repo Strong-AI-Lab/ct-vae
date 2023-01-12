@@ -16,6 +16,7 @@ model_params:
   c_delta: 0.001
   c_epsilon: 0.1
   noise: "endo"
+  # skip_transition: True
 
 data_params:
   data_path: "Data/"
@@ -35,6 +36,7 @@ exp_params:
   kld_weight: 0.00025
   manual_seed: 1250
   find_unused_parameters: True
+  update_parameters: "ct_layer"
 
 trainer_params:
   gpus: [0]

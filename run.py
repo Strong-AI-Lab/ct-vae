@@ -82,12 +82,16 @@ experiment = VAEXperiment(model,
                           val_sampling=True,
                           wandb_logger=True)
 
+if "resume_from_checkpoint" in config["trainer_params"] and "load_weights_only" in config["trainer_params"] and config["trainer_params"]["load_weights_only"]:
+    model.load_state_dict({k[6:] : v for k, v in torch.load(config["trainer_params"]["resume_from_checkpoint"])["state_dict"].items()}) # need to select only model state_dict and remove 'model.' string in keys
+    del config["trainer_params"]["resume_from_checkpoint"]
+    del config["trainer_params"]["load_weights_only"]
 
 runner = Trainer(logger=[tb_logger, wb_logger],
                  callbacks=[
                      LearningRateMonitor(),
                      ModelCheckpoint(save_top_k=2, 
-                                     dirpath =os.path.join(tb_logger.log_dir , "checkpoints"), 
+                                     dirpath= os.path.join(tb_logger.log_dir , "checkpoints"), 
                                      monitor= "val_Reconstruction_Loss",
                                      save_last= True),
                  ],

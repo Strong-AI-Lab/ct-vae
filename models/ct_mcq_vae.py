@@ -327,6 +327,7 @@ class CTMCQVAE(BaseVAE):
                  gamma: float = 0.25,
                  img_size: int = 64,
                  codebooks:int = 1,
+                 skip_transition=False,
                  **kwargs) -> None:
         super(CTMCQVAE, self).__init__()
 
@@ -337,6 +338,7 @@ class CTMCQVAE(BaseVAE):
         self.beta = beta
         self.gamma = gamma
         self.codebooks = codebooks
+        self.skip_transition = skip_transition
 
         modules = []
         if hidden_dims is None:
@@ -490,7 +492,10 @@ class CTMCQVAE(BaseVAE):
         ct_encodings = self.ct_postprocess(ct_encodings, latents_shape)
 
         # Quantization latent retrieval
-        quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, ct_encodings)
+        if self.skip_transition:
+            quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, encoding_inds)
+        else:
+            quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, ct_encodings)
 
         # Decoding
         return [self.decode(quantized_latents), input, vq_loss, ct_loss, {**{"causal_acc": torch.tensor(0.0), "mode" : "base", "mode_id": torch.tensor(0.0)}, **ct_metrics[0]}]
@@ -511,7 +516,10 @@ class CTMCQVAE(BaseVAE):
         ct_encodings = self.ct_postprocess(ct_encodings, latents_shape)
 
         # Quantization latent retrieval
-        quantized_latents, _ = self.vq_layer.compute_latents(latents, ct_encodings)
+        if self.skip_transition:
+            quantized_latents, _ = self.vq_layer.compute_latents(latents, encoding_inds)
+        else:
+            quantized_latents, _ = self.vq_layer.compute_latents(latents, ct_encodings)
         
         # Decoding
         return [self.decode(quantized_latents), input_y, torch.tensor(0.0), ct_loss, {**{"causal_acc": torch.tensor(0.0), "mode" : "action", "mode_id": torch.tensor(1.0)}, **ct_metrics[0]}]

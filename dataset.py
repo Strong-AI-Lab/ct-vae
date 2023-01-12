@@ -7,7 +7,7 @@ from torchvision import transforms
 from datasets.celeba_dataset import MyCelebA, TCeleba
 from datasets.disent_dataset import MyCars3D, MyDSprites, MySmallNORB, MyShapes3D, MySprites, TCars3D, TDSprites, TSmallNORB, TShapes3D, TSprites
 from datasets.oxford_dataset import OxfordPets
-from datasets.transition import TransitionBatchSampler
+from datasets.transition import TransitionDataset, TransitionBatchSampler
 
 
 
@@ -95,45 +95,73 @@ class VAEDataset(LightningDataModule):
 
         
     def train_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.train_dataset,
-            batch_sampler=TransitionBatchSampler(
-                    self.train_dataset, 
-                    shuffle=True,
-                    batch_size=self.train_batch_size,
-                    drop_last=True,
-                    distributed=self.distributed,
-                    limit=self.limit
-                    ),
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-        )
+        if isinstance(self.train_dataset, TransitionDataset):
+            return DataLoader(
+                self.train_dataset,
+                batch_sampler=TransitionBatchSampler(
+                        self.train_dataset, 
+                        shuffle=True,
+                        batch_size=self.train_batch_size,
+                        drop_last=True,
+                        distributed=self.distributed,
+                        limit=self.limit
+                        ),
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+            )
+        else:
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.train_batch_size,
+                num_workers=self.num_workers,
+                shuffle=True,
+                pin_memory=self.pin_memory,
+            )
+
 
     def val_dataloader(self) -> Union[DataLoader, List[DataLoader]]:
-        return DataLoader(
-            self.val_dataset,
-            batch_sampler=TransitionBatchSampler(
-                    self.val_dataset, 
-                    shuffle=False,
-                    batch_size=self.val_batch_size,
-                    drop_last=True,
-                    distributed=self.distributed
-                    ),
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-        )
+        if isinstance(self.val_dataset, TransitionDataset):
+            return DataLoader(
+                self.val_dataset,
+                batch_sampler=TransitionBatchSampler(
+                        self.val_dataset, 
+                        shuffle=False,
+                        batch_size=self.val_batch_size,
+                        drop_last=True,
+                        distributed=self.distributed
+                        ),
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+            )
+        else:
+            return DataLoader(
+                self.val_dataset,
+                batch_size=self.val_batch_size,
+                num_workers=self.num_workers,
+                shuffle=False,
+                pin_memory=self.pin_memory,
+            )
     
     def test_dataloader(self) -> Union[DataLoader, List[DataLoader]]:
-        return DataLoader(
-            self.val_dataset,
-            batch_sampler=TransitionBatchSampler(
-                    self.val_dataset, 
-                    shuffle=True,
-                    batch_size=self.val_batch_size,
-                    drop_last=True,
-                    distributed=self.distributed
-                    ),
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-        )
+        if isinstance(self.val_dataset, TransitionDataset):
+            return DataLoader(
+                self.val_dataset,
+                batch_sampler=TransitionBatchSampler(
+                        self.val_dataset, 
+                        shuffle=True,
+                        batch_size=self.val_batch_size,
+                        drop_last=True,
+                        distributed=self.distributed
+                        ),
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+            )
+        else:
+            return DataLoader(
+                self.val_dataset,
+                batch_size=self.val_batch_size,
+                num_workers=self.num_workers,
+                shuffle=True,
+                pin_memory=self.pin_memory,
+            )
      
