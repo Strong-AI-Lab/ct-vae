@@ -82,10 +82,11 @@ experiment = VAEXperiment(model,
                           val_sampling=True,
                           wandb_logger=True)
 
-if "resume_from_checkpoint" in config["trainer_params"] and "load_weights_only" in config["trainer_params"] and config["trainer_params"]["load_weights_only"]:
-    model.load_state_dict({k[6:] : v for k, v in torch.load(config["trainer_params"]["resume_from_checkpoint"])["state_dict"].items()}) # need to select only model state_dict and remove 'model.' string in keys
-    del config["trainer_params"]["resume_from_checkpoint"]
-    del config["trainer_params"]["load_weights_only"]
+trainer_config = config["trainer_params"].copy()
+if "resume_from_checkpoint" in trainer_config and "load_weights_only" in trainer_config and trainer_config["load_weights_only"]:
+    model.load_state_dict({k[6:] : v for k, v in torch.load(trainer_config["resume_from_checkpoint"])["state_dict"].items()}) # need to select only model state_dict and remove 'model.' string in keys
+    del trainer_config["resume_from_checkpoint"]
+    del trainer_config["load_weights_only"]
 
 runner = Trainer(logger=[tb_logger, wb_logger],
                  callbacks=[
@@ -97,7 +98,7 @@ runner = Trainer(logger=[tb_logger, wb_logger],
                  ],
                  strategy=DDPStrategy(find_unused_parameters=config['exp_params']['find_unused_parameters']),
                  replace_sampler_ddp = False,
-                 **config['trainer_params'])
+                 **trainer_config)
 
 
 Path(f"{tb_logger.log_dir}/Inputs").mkdir(exist_ok=True, parents=True)
