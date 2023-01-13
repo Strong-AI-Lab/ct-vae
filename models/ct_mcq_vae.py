@@ -51,7 +51,6 @@ class CausalTransition(nn.Module):
                  input_dim: int,
                  action_dim: int,
                  latent_dim: int = 800,
-                 nb_heads: int = 1,
                  noise: str = "off",
                  c_alpha: float = 0.7,
                  c_beta: float = 0.4,
@@ -103,16 +102,15 @@ class CausalTransition(nn.Module):
                         nn.Sigmoid()
                     ) # Action intervention masking, selects adjacency matrix discoverer corresponding to action a
 
-        self.nb_heads = nb_heads
+        self.nb_heads = 1 + action_dim
         self.graph_transitioner = gnn.Sequential('x, edge_index, edge_attr', [
-                                    (gnn.GATv2Conv(input_dim, latent_dim // self.nb_heads, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
+                                    (gnn.GATv2Conv(input_dim, latent_dim, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
                                     nn.ReLU(inplace=True),
-                                    (gnn.GATv2Conv(latent_dim, latent_dim // self.nb_heads, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
+                                    (gnn.GATv2Conv(latent_dim * self.nb_heads, latent_dim, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
                                     nn.ReLU(inplace=True),
-                                    (gnn.GATv2Conv(latent_dim, latent_dim // self.nb_heads, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
+                                    (gnn.GATv2Conv(latent_dim * self.nb_heads, latent_dim, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
                                     nn.ReLU(inplace=True),
-                                    nn.Linear(latent_dim, input_dim),
-                                    nn.Softmax(dim=-1)
+                                    nn.Linear(latent_dim * self.nb_heads, input_dim * self.nb_heads),
                                 ]) # Causal graph inference
 
 
@@ -185,8 +183,11 @@ class CausalTransition(nn.Module):
             return torch.bernoulli(adjacency)
     
 
-    def _compute_y(self, latent, action, adjacency):
-        # preprocess
+    def _compute_y(self, latent, action, adjacency, mask):
+        # Preprocess action
+        action_node = self.a_dense(action) # [B x A]  --> [B x D]
+
+        # Preprocess nodes
         if self.noise == "exo":
             latent = latent + torch.normal(0,1,latent.shape).to(latent.device) # noise integrated to variables
             padding_h = torch.nn.ConstantPad2d((0,0,0,1),0)
@@ -195,11 +196,11 @@ class CausalTransition(nn.Module):
         elif self.noise == "endo":
             padding_h = torch.nn.ConstantPad2d((0,0,0,2),0)
             padding_v = torch.nn.ConstantPad2d((0,2,0,0),1) # noise as extra variable
-            var_supp = torch.stack([action, torch.normal(0,1,action.shape).to(action.device)],dim=1)
+            var_supp = torch.stack([action_node, torch.normal(0,1,action_node.shape).to(action_node.device)],dim=1)
         else:
             padding_h = torch.nn.ConstantPad2d((0,0,0,1),0)
             padding_v = torch.nn.ConstantPad2d((0,1,0,0),1)
-            var_supp = action.unsqueeze(1)
+            var_supp = action_node.unsqueeze(1)
             
         nodes = torch.concat([latent,var_supp],1).view((-1,latent.size(-1))) # [(BHW+vs) x D]
         padded_adjacency = padding_h(padding_v(adjacency)) # add missing edges to action
@@ -207,14 +208,21 @@ class CausalTransition(nn.Module):
         edge_index, edge_attrs = torch_geometric.utils.dense_to_sparse(padded_adjacency) # format to edge_index [2 x E] and edge_attrs [E] 
         
         # Graph Neural Network computation
-        nodes_y = self.graph_transitioner(nodes, edge_index, edge_attr=edge_attrs) # [B(HW+vs) x D]
+        nodes_y = self.graph_transitioner(nodes, edge_index, edge_attr=edge_attrs) # [B(HW+vs) x (A+1)D]
         
-        # postprocess
+        # Postprocess
         var_supp_size = var_supp.size(1)
         action_latent_shape = list(latent.shape) # [B x HW x D]
         action_latent_shape[1] += var_supp_size # [B x (HW+vs) x D]
+        action_latent_shape[2] *= self.nb_heads # [B x (HW+vs) x (A+1)D]
+        nodes_y = nodes_y.view((action_latent_shape))[:,:-var_supp_size,:] # [B x HW x (A+1)D] (remove action and noise nodes) 
+        
+        # Masking
+        action_arg = action.argmax(dim=-1).view((latent.size(0),1,1)).repeat(1,latent.size(1),1) # [B x HW x 1]
+        action_head = torch.concat([(action_arg + 1) * self.nb_heads + i for i in range(latent.size(2))], dim=-1) # [B x HW x D]
+        nodes_y = nodes_y[...,:latent.size(2)] * (1 - mask) + torch.gather(nodes_y,-1, action_head) * mask  # [B x HW x D]
 
-        return nodes_y.view((action_latent_shape))[:,:-var_supp_size,:] # [B x HW x D] (remove action and noise nodes) 
+        return nodes_y.softmax(dim=-1)
 
 
     # @detach_and_paste
@@ -231,13 +239,12 @@ class CausalTransition(nn.Module):
         causal_graph = self._sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
-        action = self.a_dense(action) # [B x A]  --> [B x D]
-        latent_y = self._compute_y(pos_latent, action, causal_graph) # [B x HW x D]
+        latent_y = self._compute_y(pos_latent, action, causal_graph, mask) # [B x HW x D]
 
         # Compute loss function
         id_matrix = F.one_hot(torch.arange(causal_graph.size(-1)).repeat(causal_graph.size(0),1)).to(latent.device, dtype=causal_graph.dtype)
         ct_reg = self.alpha * (
-                    F.cross_entropy(self._compute_y(pos_latent, action, id_matrix).reshape((-1, latent_shape[1])).clamp(min=1e-4).log(), latent.reshape((-1, latent_shape[1])).argmax(dim=-1))
+                    F.cross_entropy(self._compute_y(pos_latent, action, id_matrix, mask).reshape((-1, latent_shape[1])).clamp(min=1e-4).log(), latent.reshape((-1, latent_shape[1])).argmax(dim=-1))
                     + F.mse_loss(causal_graph, id_matrix)
                 ) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
@@ -258,8 +265,7 @@ class CausalTransition(nn.Module):
         causal_graph = self._sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
-        action = self.a_dense(action) # [B x A] --> [B x D]
-        latent_y = self._compute_y(pos_latent, action, causal_graph) # [B x HW x D]
+        latent_y = self._compute_y(pos_latent, action, causal_graph, mask) # [B x HW x D]
 
         # Compute loss function
         ct_reg = self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
@@ -322,7 +328,6 @@ class CTMCQVAE(BaseVAE):
                  num_embeddings: int,
                  hidden_dims: List = None,
                  causal_hidden_dim: int = 800,
-                 causal_nb_heads: int = 1,
                  beta: float = 0.25,
                  gamma: float = 0.25,
                  img_size: int = 64,
@@ -383,7 +388,6 @@ class CTMCQVAE(BaseVAE):
         self.ct_layer = CausalTransition(num_embeddings, #embedding_dim//codebooks,
                                         action_dim,
                                         causal_hidden_dim,
-                                        causal_nb_heads,
                                         **kwargs)
 
         # Build Decoder

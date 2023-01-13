@@ -5,7 +5,6 @@ model_params:
   action_dim: 12
   hidden_dims: [64, 128, 256]
   causal_hidden_dim: 800
-  causal_nb_heads: 4
   num_embeddings: 32
   img_size: 64
   codebooks: 2
