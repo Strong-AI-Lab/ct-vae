@@ -50,7 +50,7 @@ class CausalTransition(nn.Module):
     def __init__(self, 
                  input_dim: int,
                  action_dim: int,
-                 latent_dim: int = 800,
+                 latent_dims: List = None,
                  noise: str = "off",
                  c_alpha: float = 0.7,
                  c_beta: float = 0.4,
@@ -74,7 +74,6 @@ class CausalTransition(nn.Module):
         super(CausalTransition, self).__init__()
         self.input_dim = input_dim
         self.action_dim = action_dim
-        self.latent_dim = latent_dim
         self.noise = noise
         self.alpha = c_alpha
         self.beta = c_beta
@@ -86,13 +85,17 @@ class CausalTransition(nn.Module):
 
         self.pos_encoding = PositionalEncoding(input_dim) # Positional encodingfor causal variables
 
+        if latent_dims is None:
+            latent_dims =  [800, 100]
+        self.latent_dims = latent_dims
+
         discovers = []
         for _ in range(action_dim + 1):
             discovers.append(
                     nn.Sequential(
-                    nn.Linear(2 * input_dim, latent_dim),
+                    nn.Linear(2 * input_dim, latent_dims[0]),
                     nn.LeakyReLU(),
-                    nn.Linear(latent_dim, 1),
+                    nn.Linear(latent_dims[0], 1),
                     nn.Sigmoid()
                     ))
         self.graph_discovers = nn.ModuleList(discovers)
@@ -103,15 +106,17 @@ class CausalTransition(nn.Module):
                     ) # Action intervention masking, selects adjacency matrix discoverer corresponding to action a
 
         self.nb_heads = 1 + action_dim
-        self.graph_transitioner = gnn.Sequential('x, edge_index, edge_attr', [
-                                    (gnn.GATv2Conv(input_dim, latent_dim, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
-                                    nn.ReLU(inplace=True),
-                                    (gnn.GATv2Conv(latent_dim * self.nb_heads, latent_dim, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
-                                    nn.ReLU(inplace=True),
-                                    (gnn.GATv2Conv(latent_dim * self.nb_heads, latent_dim, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
-                                    nn.ReLU(inplace=True),
-                                    nn.Linear(latent_dim * self.nb_heads, input_dim * self.nb_heads),
-                                ]) # Causal graph inference
+        gnn_modules = []
+        in_channel = input_dim
+        for dim in latent_dims[1:]:
+            gnn_modules += [
+                (gnn.GATv2Conv(in_channel, dim, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
+                nn.ReLU(inplace=True),
+            ]
+            in_channel = dim * self.nb_heads
+        gnn_modules += [nn.Linear(in_channel, input_dim * self.nb_heads)]
+
+        self.graph_transitioner = gnn.Sequential('x, edge_index, edge_attr', gnn_modules) # Causal graph inference
 
 
     def _compute_mask(self, one_hot_latent, action):
@@ -327,7 +332,7 @@ class CTMCQVAE(BaseVAE):
                  action_dim: int,
                  num_embeddings: int,
                  hidden_dims: List = None,
-                 causal_hidden_dim: int = 800,
+                 causal_hidden_dims: List = None,
                  beta: float = 0.25,
                  gamma: float = 0.25,
                  img_size: int = 64,
@@ -387,7 +392,7 @@ class CTMCQVAE(BaseVAE):
 
         self.ct_layer = CausalTransition(num_embeddings, #embedding_dim//codebooks,
                                         action_dim,
-                                        causal_hidden_dim,
+                                        causal_hidden_dims,
                                         **kwargs)
 
         # Build Decoder
