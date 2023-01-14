@@ -4,7 +4,7 @@ model_params:
   embedding_dim: 128
   action_dim: 12
   hidden_dims: [64, 128, 256]
-  causal_hidden_dim: [800, 100, 100, 100]
+  causal_hidden_dims: [400, 50, 50, 50]
   num_embeddings: 32
   img_size: 64
   codebooks: 2

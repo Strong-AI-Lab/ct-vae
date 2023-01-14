@@ -111,10 +111,11 @@ class CausalTransition(nn.Module):
         for dim in latent_dims[1:]:
             gnn_modules += [
                 (gnn.GATv2Conv(in_channel, dim, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),
-                nn.ReLU(inplace=True),
+                nn.LeakyReLU(inplace=True),
             ]
             in_channel = dim * self.nb_heads
-        gnn_modules += [nn.Linear(in_channel, input_dim * self.nb_heads)]
+        gnn_modules += [(gnn.GATv2Conv(in_channel, input_dim, edge_dim=1, heads=self.nb_heads), 'x, edge_index, edge_attr -> x'),]
+        # gnn_modules += [nn.Linear(in_channel, input_dim * self.nb_heads)]
 
         self.graph_transitioner = gnn.Sequential('x, edge_index, edge_attr', gnn_modules) # Causal graph inference
 
@@ -160,8 +161,8 @@ class CausalTransition(nn.Module):
         repeats = latent.size(1)
         action = action.unsqueeze(1).repeat(1,repeats,1) # [B x A] --> [B x HW x A]
 
-        no_inter_coeffs = torch.zeros((latent.size(0), repeats, repeats)).to(latent.device)  # [B x HW x HW]
-        inter_coeffs = torch.zeros((latent.size(0), repeats, repeats)).to(latent.device)  # [B x HW x HW]
+        no_inter_coeffs = torch.zeros((latent.size(0), repeats, repeats)).to(latent.device) # [B x HW x HW]
+        inter_coeffs = torch.zeros((latent.size(0), repeats, repeats)).to(latent.device) # [B x HW x HW]
 
         for i in range(repeats):
             nodes_i = latent[:,i,:].unsqueeze(1).repeat(1,repeats,1)
@@ -244,14 +245,15 @@ class CausalTransition(nn.Module):
         causal_graph = self._sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
-        latent_y = self._compute_y(pos_latent, action, causal_graph, mask) # [B x HW x D]
+        weighted_graph = adjacency_coeffs * causal_graph
+        latent_y = self._compute_y(pos_latent, action, weighted_graph, mask) # [B x HW x D]
 
-        # Compute loss function
+        # Compute regularization
         id_matrix = F.one_hot(torch.arange(causal_graph.size(-1)).repeat(causal_graph.size(0),1)).to(latent.device, dtype=causal_graph.dtype)
         ct_reg = self.alpha * (
                     F.cross_entropy(self._compute_y(pos_latent, action, id_matrix, mask).reshape((-1, latent_shape[1])).clamp(min=1e-4).log(), latent.reshape((-1, latent_shape[1])).argmax(dim=-1))
                     + F.mse_loss(causal_graph, id_matrix)
-                ) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
+                )
         
         latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x D x H x W]
         return [latent_y, ct_reg, {"ct_adjacency": adjacency_coeffs.mean(0)}]
@@ -270,10 +272,11 @@ class CausalTransition(nn.Module):
         causal_graph = self._sample_bernoulli(adjacency_coeffs)
 
         # Infer y on causal graph with GNN
-        latent_y = self._compute_y(pos_latent, action, causal_graph, mask) # [B x HW x D]
+        weighted_graph = adjacency_coeffs * causal_graph
+        latent_y = self._compute_y(pos_latent, action, weighted_graph, mask) # [B x HW x D]
 
-        # Compute loss function
-        ct_reg = self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
+        # Compute regularization
+        ct_reg = self.beta * self.adjacency_KL_loss(adjacency_coeffs) + self.delta * self.graph_size_loss(causal_graph) + self.epsilon * self.positive_trial_loss(adjacency_coeffs)
         
         latent_y = latent_y.permute(0,2,1).view(latent_shape) # [B x D x H x W]
         return [latent_y, ct_reg, {"ct_mask": mask.view(latent_shape[:1]+latent_shape[2:]).mean(0), "ct_adjacency": adjacency_coeffs.mean(0)}]
@@ -292,14 +295,14 @@ class CausalTransition(nn.Module):
             unbatched_distances = F.cross_entropy(y_log, y_inds, reduction='none') # [BHW]
             distances[:,i] = unbatched_distances.view((latent_y.size(0), -1)).mean(dim=-1) # [B]
             
-        action_probas = 1 - torch.softmax(distances,dim=-1)
+        action_probas = F.softmin(distances,dim=-1)
         return [action_probas, torch.tensor(0.0), {}]
 
 
     
     def latent_loss(self, latent, latent_y):
         latent_y = latent_y.detach()
-        return self. latent_CrossEntropy_loss(latent, latent_y) + self.beta * self.latent_KL_loss(latent, latent_y) 
+        return self. latent_CrossEntropy_loss(latent, latent_y)
     
     def latent_MSE_loss(self, latent, latent_y):
         return F.mse_loss(latent, latent_y)
@@ -310,16 +313,18 @@ class CausalTransition(nn.Module):
         latent_y = latent_y.permute(0, 2, 3, 1).reshape((-1, latent_y.size(1))) # [B x D x H x W] --> [BHW x D]
         latent_y = torch.argmax(latent_y, dim=-1)
         return F.cross_entropy(latent, latent_y)
-    
-    def latent_KL_loss(self, latent, latent_y):
-        return F.kl_div(latent.clamp(min=1e-4).log(), latent_y, reduction="batchmean")
 
+        
+    def adjacency_KL_loss(self, adjacency_coeffs):
+        log_coeffs = adjacency_coeffs.reshape((adjacency_coeffs.size(0), -1)).log_softmax(dim=-1) # [B x HW x HW] --> [B x HWHW]
+        target = torch.rand(log_coeffs.shape).softmax(dim=-1).to(log_coeffs.device) # no constraint on graph, uniform law
+        return F.kl_div(log_coeffs, target, reduction="batchmean")
 
     def graph_size_loss(self, causal_graph):
-        return torch.linalg.norm(causal_graph)
+        return torch.linalg.matrix_norm(causal_graph).mean()
     
     def positive_trial_loss(self, adjacency_coeffs):
-        return torch.linalg.norm((1-adjacency_coeffs).prod(-1))
+        return torch.linalg.vector_norm((1-adjacency_coeffs).prod(-1), dim=-1).mean()
 
 
 
