@@ -210,7 +210,8 @@ class CausalTransition(nn.Module):
             padding_v = torch.nn.ConstantPad2d((0,1,0,0),1)
             var_supp = action_node.unsqueeze(1)
             
-        nodes = torch.concat([latent,var_supp],1).view((-1,latent.size(-1))) # [(BHW+vs) x D]
+        embbeding_dim = latent.size(-1)
+        nodes = torch.concat([latent,var_supp],1).view((-1,embbeding_dim)) # [(BHW+vs) x D]
         padded_adjacency = padding_h(padding_v(adjacency)) # add missing edges to action
 
         edge_index, edge_attrs = torch_geometric.utils.dense_to_sparse(padded_adjacency) # format to edge_index [2 x E] and edge_attrs [E] 
@@ -227,7 +228,7 @@ class CausalTransition(nn.Module):
         
         # Masking
         action_arg = action.argmax(dim=-1).view((latent.size(0),1,1)).repeat(1,latent.size(1),1) # [B x HW x 1]
-        action_head = torch.concat([(action_arg + 1) * self.nb_heads + i for i in range(latent.size(2))], dim=-1) # [B x HW x D]
+        action_head = torch.concat([(action_arg + 1) * embbeding_dim + i for i in range(embbeding_dim)], dim=-1) # [B x HW x D]
         nodes_y = nodes_y[...,:latent.size(2)] * (1 - mask) + torch.gather(nodes_y,-1, action_head) * mask  # [B x HW x D]
 
         return nodes_y.softmax(dim=-1)
