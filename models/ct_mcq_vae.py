@@ -36,7 +36,7 @@ class PositionalEncoding(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         """
         Args:
-            x: Tensor, shape [seq_len, batch_size, embedding_dim]
+            x: Tensor, shape [batch_size, seq_len, embedding_dim]
         """
         x = x.transpose(0,1)
         x = x + self.pe[:x.size(0)].to(x.device)
@@ -101,7 +101,7 @@ class CausalTransition(nn.Module):
         self.graph_discovers = nn.ModuleList(discovers)
 
         self.mask = nn.Sequential(
-                        nn.Linear(action_dim, input_dim),
+                        nn.Linear(action_dim + input_dim, input_dim),
                         nn.Sigmoid()
                     ) # Action intervention masking, selects adjacency matrix discoverer corresponding to action a
 
@@ -121,9 +121,11 @@ class CausalTransition(nn.Module):
 
 
     def _compute_mask(self, one_hot_latent, action):
-        action = action.unsqueeze(1).repeat(1,one_hot_latent.size(1), 1)
+        action = action.unsqueeze(1).repeat(1,one_hot_latent.size(1), 1).to(dtype=torch.float32)
+        pos_embed = self.pos_encoding(torch.zeros(one_hot_latent.shape).to(one_hot_latent.device))
+        action_pos = torch.concat([action, pos_embed], dim=-1)
 
-        inter_mask = self.mask(action.to(dtype=torch.float32))
+        inter_mask = self.mask(action_pos)
         inter_masked_latent = (one_hot_latent * inter_mask ).sum(dim=-1) # [B x HW]
         logits = torch.stack([1 - inter_masked_latent, inter_masked_latent],dim=-1).clamp(min=1e-4).log() # [B x HW x 2], clamp to avoid -inf values
 
