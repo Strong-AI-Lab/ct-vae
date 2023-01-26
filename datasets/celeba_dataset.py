@@ -24,5 +24,5 @@ class MyCelebA(CelebA):
 
 
 def TCeleba(*args, **kwargs):
-    return TransitionDataset(MyCelebA(*args, **kwargs), num_variations= 40, indices_alias="filename")
+    return TransitionDataset(MyCelebA(*args, **kwargs), num_variations= 10, indices_alias="filename")
 
