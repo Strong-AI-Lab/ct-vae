@@ -4,42 +4,42 @@ model_params:
   embedding_dim: 128
   action_dim: 12
   hidden_dims: [64, 128, 256]
-  causal_hidden_dims: [400, 50, 50, 50]
-  num_embeddings: 32
+  num_embeddings: 64
   img_size: 64
-  codebooks: 2
-  beta: 0.25
-  gamma: 0.05
-  c_alpha: 1.0
-  c_beta: 0.1
-  c_delta: 0.001
+  codebooks: 1
+  beta: 0.1
+  gamma: 1.5
+  c_alpha: 0.01
+  c_beta: 0.4
+  c_delta: 0.01
   c_epsilon: 0.1
-  noise: "endo"
+  noise: "off"
   # skip_transition: True
 
 data_params:
   data_path: "Data/"
   dataset_name: "TShapes3D"
-  train_batch_size: 8
-  val_batch_size: 8
+  train_batch_size: 16
+  val_batch_size: 16
   patch_size: 64
   num_workers: 4
-  limit: 16000
+  # limit: 16000
   # distributed: False
 
 exp_params:
   # metrics: ["DCI", "MIG", "SAP", "FactorVaeScore"]
   LR: 0.0005
   weight_decay: 0.0
-  scheduler_gamma: 0.98
+  scheduler_gamma: 0.994
   kld_weight: 0.00025
   manual_seed: 1250
   find_unused_parameters: True
   update_parameters: "ct_layer"
 
 trainer_params:
-  gpus: [0]
-  max_epochs: 20
+  gpus: [0,1,2,5,6]
+  max_epochs: 100 
+  # load_weights_only: True
 
 logging_params:
   save_dir: "logs/"

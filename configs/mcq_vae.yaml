@@ -1,14 +1,16 @@
 model_params:
   name: 'MCQVAE'
-  in_channels: 10
-  embedding_dim: 64 
-  hidden_dims: [32, 64, 128, 256]
-  num_embeddings: 16
-  img_size: 256
+  in_channels: 3
+  embedding_dim: 128
+  hidden_dims: [64, 128, 256]
+  num_embeddings: 64
+  img_size: 64
   codebooks: 4
   beta: 0.25
 
 data_params:
+  data_path: "Data/"
+  dataset_name: "Shapes3D"
   # data_path: "../ARC/training_data_base.json"
   data_path: "../ARC/training_data_augment800_uncoupled.json"
   train_batch_size: 64
@@ -23,6 +25,7 @@ exp_params:
   scheduler_gamma: 0.98
   kld_weight: 0.00025
   manual_seed: 1320
+  find_unused_parameters: False
 
 trainer_params:
   gpus: [1]
