@@ -84,7 +84,7 @@ experiment = VAEXperiment(model,
 
 trainer_config = config["trainer_params"].copy()
 if "resume_from_checkpoint" in trainer_config and "load_weights_only" in trainer_config and trainer_config["load_weights_only"]:
-    model.load_state_dict({k[6:] : v for k, v in torch.load(trainer_config["resume_from_checkpoint"])["state_dict"].items()}) # need to select only model state_dict and remove 'model.' string in keys
+    model.load_state_dict({k[6:] : v for k, v in torch.load(trainer_config["resume_from_checkpoint"])["state_dict"].items()}, strict=False) # need to select only model state_dict and remove 'model.' string in keys
     del trainer_config["resume_from_checkpoint"]
     del trainer_config["load_weights_only"]
 
