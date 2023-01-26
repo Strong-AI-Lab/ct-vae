@@ -24,7 +24,7 @@ DATASETS = {
         # "XYObject": XYObjectData,
         # "XYObjectShaded": XYObjectShadedData
     }
-dataset_name = "sprites"
+dataset_name = "3dshapes"
 data = DATASETS[dataset_name](data_root="Data/",prepare=True)
 # dataset = DisentDataset(data, return_factors=True)
 
@@ -45,12 +45,12 @@ s_df = pd.DataFrame({
     'Split': split_list,
 })
 print("Split dataframe generated.", Counter(split_list))
-s_df.to_csv(f'Data/{dataset_name}/list_eval_partition_big.txt')
+s_df.to_csv(f'Data/{dataset_name}/list_eval_partition.txt')
 
 
 # Save variations
 max_variations = len(data.factor_names)
-max_instances_per_variation = 50000
+max_instances_per_variation = 1000
 print("Factors : ", *zip(data.factor_names, data.factor_sizes))
 inputs = []
 outputs = []
@@ -59,7 +59,7 @@ sources = []
 targets = []
 vsplits = []
 
-
+uniques = set()
 for f, _ in enumerate(tqdm(data.factor_names)):
     for v in tqdm(range(data.factor_sizes[f] - 1)):
         samples = [[random.sample(range(i),k=1)[0] for i in data.factor_sizes] for _ in range(max_instances_per_variation)]
@@ -73,13 +73,15 @@ for f, _ in enumerate(tqdm(data.factor_names)):
             
             inp = data.pos_to_idx(pos_s)
             out = data.pos_to_idx(pos_t)
-            if split_list[inp] == split_list[out] and (inp, f) not in list(zip(inputs, variations)):
+            if split_list[inp] == split_list[out] and (inp, out) not in uniques and (out, inp) not in uniques:
                 inputs += [inp, out]
                 outputs += [out, inp]
                 variations += [f, f]
                 sources += [s, t]
                 targets += [t, s]
                 vsplits += [split_list[inp],split_list[inp]] 
+                uniques.add((inp, out))
+                uniques.add((out, inp))
 
 df = pd.DataFrame({
     'Inputs': inputs,
@@ -90,8 +92,8 @@ df = pd.DataFrame({
     'Splits': vsplits,
 })
 print("Variations: ", Counter(variations), "Splits: ", Counter(vsplits))
-print("Number of duplicates: ", len(inputs) - len(set(zip(inputs, variations))))
+print("Number of duplicates: ", len(inputs) - len(uniques))
 print("Variation dataframe generated.")
 print(df)
 
-df.to_csv(f'Data/{dataset_name}/variation_attrs_{max_variations}_big.txt')
+df.to_csv(f'Data/{dataset_name}/variation_attrs_{max_variations}.txt')
