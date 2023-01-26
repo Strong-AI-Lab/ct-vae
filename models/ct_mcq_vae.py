@@ -10,12 +10,6 @@ from typing import Union, List
 
 
 
-def detach_and_paste(func):
-    def inner(_self: nn.Module, x : Tensor, *args, **kwargs):
-        # y, *remain = func(_self, x, *args, **kwargs)
-        y, *remain = func(_self, x.detach(), *args, **kwargs)
-        return x + (y - x).detach(), *remain
-    return inner
 
 class PositionalEncoding(nn.Module):
     """
@@ -234,7 +228,6 @@ class CausalTransition(nn.Module):
         return nodes_y.softmax(dim=-1)
 
 
-    # @detach_and_paste
     def forward(self, latent: Tensor, **kwargs) -> List[Tensor]:
         latent_shape = latent.shape # [B x D x H x W]
         latent = latent.permute(0,2,3,1).view(latent_shape[0], -1, latent_shape[1]) # [B x HW x D]

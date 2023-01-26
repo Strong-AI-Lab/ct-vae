@@ -83,6 +83,7 @@ class VAEXperiment(pl.LightningModule):
         x = self.model.encode(x)[0]
         x = x.view(x.size(0),-1)
         return x
+    
     def log_all(self, losses: dict, batch_size, validation: bool = False):
         # Create validation keys
         if validation:

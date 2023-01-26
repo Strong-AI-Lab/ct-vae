@@ -1,7 +1,7 @@
 
 from typing import List, Optional, Sequence, Union
 from pytorch_lightning import LightningDataModule
-from torch.utils.data import DataLoader, Dataset, BatchSampler
+from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from datasets.celeba_dataset import MyCelebA, TCeleba
@@ -32,7 +32,7 @@ class VAEDataset(LightningDataModule):
     PyTorch Lightning data module 
 
     Args:
-        data_dir: root directory of your dataset.
+        data_path: root directory of your dataset.
         train_batch_size: the batch size to use during training.
         val_batch_size: the batch size to use during validation.
         patch_size: the size of the crop to take from the original images.
@@ -70,7 +70,7 @@ class VAEDataset(LightningDataModule):
     def setup(self, stage: Optional[str] = None) -> None:
 
         train_transforms = transforms.Compose([transforms.ToTensor(),
-                                            #   transforms.RandomHorizontalFlip(),
+                                              # transforms.RandomHorizontalFlip(),
                                               transforms.CenterCrop(148),
                                               transforms.Resize(self.patch_size)])
         

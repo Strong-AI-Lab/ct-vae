@@ -19,6 +19,7 @@ class DIPVAE(BaseVAE):
         self.latent_dim = latent_dim
         self.lambda_diag = lambda_diag
         self.lambda_offdiag = lambda_offdiag
+        self.in_channels = in_channels
 
         modules = []
         if hidden_dims is None:
@@ -71,7 +72,7 @@ class DIPVAE(BaseVAE):
                                                output_padding=1),
                             nn.BatchNorm2d(hidden_dims[-1]),
                             nn.LeakyReLU(),
-                            nn.Conv2d(hidden_dims[-1], out_channels= 3,
+                            nn.Conv2d(hidden_dims[-1], out_channels= self.in_channels,
                                       kernel_size= 3, padding= 1),
                             nn.Tanh())
 
@@ -100,7 +101,7 @@ class DIPVAE(BaseVAE):
         :return: (Tensor) [B x C x H x W]
         """
         result = self.decoder_input(z)
-        result = result.view(-1, 512, 2, 2)
+        result = result.view(-1, result.size(-1) // 4, 2, 2)
         result = self.decoder(result)
         result = self.final_layer(result)
         return result

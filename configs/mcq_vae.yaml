@@ -12,7 +12,7 @@ data_params:
   data_path: "Data/"
   dataset_name: "Shapes3D"
   # data_path: "../ARC/training_data_base.json"
-  data_path: "../ARC/training_data_augment800_uncoupled.json"
+  # data_path: "../ARC/training_data_augment800_uncoupled.json"
   train_batch_size: 64
   val_batch_size:  64
   patch_size: 64
