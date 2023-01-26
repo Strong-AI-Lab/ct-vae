@@ -2,6 +2,7 @@ env/
 Data/
 logs/
 .vscode/
+images/
 wandb/
 
 VanillaVAE/version_0/
