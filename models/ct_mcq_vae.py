@@ -200,7 +200,7 @@ class CausalTransition(nn.Module):
             latent = latent + torch.normal(0,1,latent.shape).to(latent.device) # noise integrated to variables
             padding_h = torch.nn.ConstantPad2d((0,0,0,1),0)
             padding_v = torch.nn.ConstantPad2d((0,1,0,0),1)
-            var_supp = action.unsqueeze(1)
+            var_supp = action_node.unsqueeze(1)
         elif self.noise == "endo":
             padding_h = torch.nn.ConstantPad2d((0,0,0,2),0)
             padding_v = torch.nn.ConstantPad2d((0,2,0,0),1) # noise as extra variable
@@ -328,6 +328,17 @@ class CausalTransition(nn.Module):
     
     def positive_trial_loss(self, adjacency_coeffs):
         return torch.linalg.vector_norm((1-adjacency_coeffs).prod(-1), dim=-1).mean()
+    
+    def causal_accuracy(self, action_probas, action):
+        return (torch.argmax(action_probas, dim=-1)==torch.argmax(action, dim=-1)).float().mean()
+
+    def causal_undirected_accuracy(self, action_probas, action):
+        dim = action.size(-1)
+        action_recons = F.one_hot(torch.argmax(action_probas,dim=-1), num_classes=dim)
+        action_recons_dir = action_recons[:,dim//2:] + action_recons[:,:dim//2]
+        action_dir = action[:,dim//2:] + action[:,:dim//2]
+        return self.causal_accuracy(action_recons_dir, action_dir)
+
 
 
 
@@ -515,7 +526,7 @@ class CTMCQVAE(BaseVAE):
             quantized_latents, vq_loss = self.vq_layer.compute_latents(latents, ct_encodings)
 
         # Decoding
-        return [self.decode(quantized_latents), input, vq_loss, ct_loss, {**{"causal_acc": torch.tensor(0.0), "mode" : "base", "mode_id": torch.tensor(0.0)}, **ct_metrics[0]}]
+        return [self.decode(quantized_latents), input, vq_loss, ct_loss, {**{"causal_acc": torch.tensor(0.0), "causal_nodir_acc": torch.tensor(0.0), "mode" : "base", "mode_id": torch.tensor(0.0)}, **ct_metrics[0]}]
 
         
     def forward_action(self, input: Tensor, action: Tensor, input_y: Tensor = None, **kwargs) -> List[Tensor]:
@@ -539,7 +550,7 @@ class CTMCQVAE(BaseVAE):
             quantized_latents, _ = self.vq_layer.compute_latents(latents, ct_encodings)
         
         # Decoding
-        return [self.decode(quantized_latents), input_y, torch.tensor(0.0), ct_loss, {**{"causal_acc": torch.tensor(0.0), "mode" : "action", "mode_id": torch.tensor(1.0)}, **ct_metrics[0]}]
+        return [self.decode(quantized_latents), input_y, torch.tensor(0.0), ct_loss, {**{"causal_acc": torch.tensor(0.0), "causal_nodir_acc": torch.tensor(0.0), "mode" : "action", "mode_id": torch.tensor(1.0)}, **ct_metrics[0]}]
 
 
     def forward_causal(self, input: Tensor, input_y: Tensor, action: Tensor = None, **kwargs) -> List[Tensor]:
@@ -556,10 +567,11 @@ class CTMCQVAE(BaseVAE):
         encodings_one_hot_x = self.ct_preprocess(encoding_x, latents_shape) # [B x N x (K*H) x W]
         encodings_one_hot_y = self.ct_preprocess(encoding_y, latents_shape) # [B x N x (K*H) x W]
         recons_action, ct_reg, *ct_metrics = self.ct_layer.forward_transition(encodings_one_hot_x, encodings_one_hot_y)
-        ct_acc = (torch.argmax(recons_action, dim=-1)==torch.argmax(action, dim=-1)).float().mean()
+        ct_nodir_acc = self.ct_layer.causal_undirected_accuracy(recons_action, action)
+        ct_acc = self.ct_layer.causal_accuracy(recons_action, action)
         
-        # Decoding
-        return [recons_action, action, torch.tensor(0.0), ct_reg, {**{"causal_acc": ct_acc, "mode": "causal", "mode_id": torch.tensor(2.0)}, **ct_metrics[0]}]
+        # Decoding # TODO: causal_acc and causal_nodir exist only in causal mode but are currently given for every mode, making logging hard, find a way to remove them from other modes
+        return [recons_action, action, torch.tensor(0.0), ct_reg, {**{"causal_acc": ct_acc, "causal_nodir_acc": ct_nodir_acc, "mode": "causal", "mode_id": torch.tensor(2.0)}, **ct_metrics[0]}]
 
 
     FORWARD_MODES = {
