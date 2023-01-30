@@ -8,6 +8,7 @@ Repository for the CT-VAE model. This repository is based on a fork of the [pyto
 ## Datasets
 
 The repository contains several datasets for reconstruction tasks:
+  <!-- - [AFHQ](https://openaccess.thecvf.com/content_CVPR_2020/html/Choi_StarGAN_v2_Diverse_Image_Synthesis_for_Multiple_Domains_CVPR_2020_paper.html) -->
   - [CelebA](https://openaccess.thecvf.com/content_iccv_2015/html/Liu_Deep_Learning_Face_ICCV_2015_paper.html)
   - [Cars3D](https://papers.nips.cc/paper/2015/hash/e07413354875be01a996dc560274708e-Abstract.html)
   - [DSprites](https://openreview.net/forum?id=Sy2fzU9gl) 
@@ -21,6 +22,7 @@ The CelebA dataset can be downloaded [here](http://mmlab.ie.cuhk.edu.hk/projects
 Variants of these datasets for Causal Transition tasks are available: 
     
   - TCeleba
+  <!-- - TAFHQ -->
   - TSprites
   - TShapes3D
   - TSmallNORB
@@ -28,6 +30,12 @@ Variants of these datasets for Causal Transition tasks are available:
   - TCars3D
 
 The transition datasets contain pairs of images such that the value of only one label changes between the two images. If the label is categorical, then a transition can happen only between two adjacent values.
+
+To create the transition datasets, run the following scripts:
+```
+$ python utils/celeba_variation_gen.py
+$ python utils/disent_variation_gen.py <dataset_name>
+```
 
 
 ## Installation

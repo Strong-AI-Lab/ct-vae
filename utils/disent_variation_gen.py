@@ -1,4 +1,6 @@
 
+import sys
+
 import torch
 from torch.utils.data import random_split
 
@@ -10,6 +12,12 @@ from collections import Counter
 import random
 from tqdm import tqdm
 
+if len(sys.argv) < 2:
+    c = sys.argv[0]
+    print(f"Usage: {c} <dataset_name>")
+    exit()
+    
+dataset_name = sys.argv[1]
 
 # Build dataset
 DATASETS = {
@@ -24,7 +32,6 @@ DATASETS = {
         # "XYObject": XYObjectData,
         # "XYObjectShaded": XYObjectShadedData
     }
-dataset_name = "3dshapes"
 data = DATASETS[dataset_name](data_root="Data/",prepare=True)
 # dataset = DisentDataset(data, return_factors=True)
 
