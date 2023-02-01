@@ -41,7 +41,7 @@ $ python utils/disent_variation_gen.py <dataset_name>
 ## Installation
 ```
 $ git clone https://github.com/Strong-AI-Lab/ct-vae
-$ cd PyTorch-VAE
+$ cd ct-vae
 $ pip install -r requirements.txt
 ```
 
