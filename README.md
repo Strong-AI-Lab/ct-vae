@@ -2,13 +2,12 @@
 # Causal Transition VAE
 
 
-Repository for the CT-VAE model. This repository is based on a fork of the [pytorch-VAE](https://github.com/AntixK/PyTorch-VAE) library with two new models: the MCQ-VAE and the CT-VAE, and additional controls over the datasets and experiments.
+Official repository for the CT-VAE model introduced in the article ["Disentanglement of Latent Representations via Sparse Causal Interventions" [Gendron, Witbrock, and Dobbie; 2023]](https://arxiv.org/abs/2302.00869). This repository is based on a fork of the [pytorch-VAE](https://github.com/AntixK/PyTorch-VAE) library with two new models: the MCQ-VAE and the CT-VAE, and additional controls over the datasets and experiments.
 
 
 ## Datasets
 
 The repository contains several datasets for reconstruction tasks:
-  <!-- - [AFHQ](https://openaccess.thecvf.com/content_CVPR_2020/html/Choi_StarGAN_v2_Diverse_Image_Synthesis_for_Multiple_Domains_CVPR_2020_paper.html) -->
   - [CelebA](https://openaccess.thecvf.com/content_iccv_2015/html/Liu_Deep_Learning_Face_ICCV_2015_paper.html)
   - [Cars3D](https://papers.nips.cc/paper/2015/hash/e07413354875be01a996dc560274708e-Abstract.html)
   - [DSprites](https://openreview.net/forum?id=Sy2fzU9gl) 
@@ -22,7 +21,6 @@ The CelebA dataset can be downloaded [here](http://mmlab.ie.cuhk.edu.hk/projects
 Variants of these datasets for Causal Transition tasks are available: 
     
   - TCeleba
-  <!-- - TAFHQ -->
   - TSprites
   - TShapes3D
   - TSmallNORB
@@ -116,12 +114,25 @@ $ cd PyTorch-VAE
 $ python hyperparameter_search.py -c configs_hyp/<config-file-name.yaml>
 ```
 
-## License
-
-TODO
-
 
 ## Citations
 
-If you use this repository, please cite:
-TODO
+If you use this repository, please cite our work:
+```
+@article{DBLP:journals/corr/abs-2302-00869,
+  author    = {Ga{\"{e}}l Gendron and
+               Michael Witbrock and
+               Gillian Dobbie},
+  title     = {Disentanglement of Latent Representations via Sparse Causal Interventions},
+  journal   = {CoRR},
+  volume    = {abs/2302.00869},
+  year      = {2023},
+  url       = {https://doi.org/10.48550/arXiv.2302.00869},
+  doi       = {10.48550/arXiv.2302.00869},
+  eprinttype = {arXiv},
+  eprint    = {2302.00869},
+  timestamp = {Thu, 09 Feb 2023 16:11:17 +0100},
+  biburl    = {https://dblp.org/rec/journals/corr/abs-2302-00869.bib},
+  bibsource = {dblp computer science bibliography, https://dblp.org}
+}
+```
